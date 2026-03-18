@@ -205,7 +205,36 @@ The plotting input is the single consolidated HEARTY `*.minorfreq.txt` table wit
 
 ## ROH / Window Plotting
 
-`ROH_Plot_Tool.R` takes HEARTY `*.windows.txt.gz` files and plots windowed heterozygosity / derived ROH patterns.
+`ROH_Plot_Tool.R` takes HEARTY `*.windows.txt.gz` files and turns them into visual summaries of low-heterozygosity regions.
+
+The input files are the 100 kb window summaries written by `HEARTY.py`, for example:
+
+```text
+scaffold_1 0-99999: 28741 sites, 3 sites with 'HET', Proportion: 0.0001044
+```
+
+For each window, the script reads:
+- the scaffold name
+- the window coordinates
+- the number of callable sites in that window
+- the number of HET sites in that window
+- the window heterozygosity proportion
+
+The plotting script then:
+- colors windows by heterozygosity proportion
+- flags windows at or below a chosen ROH-like threshold
+- optionally “bridges” single-bin gaps, so an isolated non-ROH bin between two ROH bins can still be treated as part of a continuous ROH block
+- calculates segment-based FROH summaries from the raw and bridged ROH calls
+
+So this script is not calling ROH directly from reads or genotype likelihoods. It is interpreting the window-level heterozygosity profiles produced by HEARTY.
+
+### Basic usage
+
+Show help:
+
+```bash
+Rscript ROH_Plot_Tool.R --help
+```
 
 ### Single-sample usage
 
@@ -215,6 +244,27 @@ Rscript ROH_Plot_Tool.R \
   --input results/sample01_het0.25.mincov10.windows.txt.gz \
   --output-pdf results/plots/sample01_roh.pdf
 ```
+
+Full example with explicit tuning parameters:
+
+```bash
+Rscript ROH_Plot_Tool.R \
+  --mode single \
+  --input sample.ROH.txt \
+  --output-pdf sample.ROH.pdf \
+  --min-length-mb 20 \
+  --max-scaffolds 40 \
+  --fill-cap 0.0005 \
+  --bin-size-bp 500000 \
+  --fallback-resolution 100 \
+  --roh-threshold 0.0001
+```
+
+Single-sample mode writes one PDF for one sample and prints summary statistics to the terminal, including:
+- number of windows parsed
+- number of scaffolds plotted
+- raw and bridged ROH bin counts
+- FROH values for segments longer than 100 kb, 1 Mb, and 5 Mb
 
 ### Batch usage
 
@@ -226,6 +276,22 @@ Rscript ROH_Plot_Tool.R \
   --combined-pdf roh_combined.pdf
 ```
 
+Full batch example:
+
+```bash
+Rscript ROH_Plot_Tool.R \
+  --mode batch \
+  --sample-list Sample_table.txt \
+  --summary-out ROH_batch_summary.tsv \
+  --combined-pdf ROH_batch_combined.pdf \
+  --min-length-mb 20 \
+  --max-scaffolds 40 \
+  --fill-cap 0.0005 \
+  --bin-size-bp 500000 \
+  --fallback-resolution 100 \
+  --roh-threshold 0.0001
+```
+
 Batch list format:
 
 ```text
@@ -233,13 +299,81 @@ sampleA<TAB>/path/sampleA_het0.25.mincov10.windows.txt.gz
 sampleB<TAB>/path/sampleB_het0.25.mincov10.windows.txt.gz
 ```
 
-Common tuning arguments:
-- `--min-length-mb`
-- `--max-scaffolds`
-- `--fill-cap`
-- `--bin-size-bp`
-- `--fallback-resolution`
+Headered sample list files are also accepted, for example:
+
+```text
+sample	file
+SampleA	/path/SampleA.ROH.txt
+SampleB	/path/SampleB.ROH.txt
+```
+
+Batch mode writes:
+- a summary TSV with FROH and plotting metadata for each sample
+- a combined PDF with multiple samples arranged together for comparison
+
+### Required inputs
+
+- `--mode`
+  Must be either `single` or `batch`.
+- Single mode:
+  Requires `--input` for one window-summary file and `--output-pdf` for one output PDF.
+- Batch mode:
+  Requires `--sample-list`, `--summary-out`, and `--combined-pdf`.
+
+### Interpreting the plot
+
+- Window fill color:
+  Lower heterozygosity windows are shown toward the low end of the color scale and higher heterozygosity windows toward the high end.
+- Black ticks:
+  Windows whose heterozygosity proportion is less than or equal to `--roh-threshold`.
+- Orange ticks:
+  “Bridged” ROH calls, where a single non-ROH window between two ROH windows is filled in to create a more continuous segment.
+
+This gives you two related views:
+- a strict raw ROH-like signal
+- a slightly smoothed version that is less sensitive to one noisy window interrupting a longer low-heterozygosity tract
+
+### Parameter meanings
+
 - `--roh-threshold`
+  The heterozygosity proportion cutoff used to mark a window as ROH-like. Lower values are stricter. This is the most important biological setting.
+  A window is treated as raw ROH if heterozygosity is less than or equal to this threshold.
+- `--fill-cap`
+  Caps the displayed color scale at a maximum heterozygosity value so very high windows do not dominate the gradient. This changes the visualization, not the ROH calling itself.
+- `--min-length-mb`
+  Minimum scaffold length to include in the plot. Short scaffolds are excluded from the visual output.
+- `--max-scaffolds`
+  Maximum number of scaffolds to plot per sample, ranked by scaffold length.
+- `--bin-size-bp`
+  Bin size used for plotting aggregation. This controls visual smoothing in the PDF and does not change the original HEARTY windows file.
+- `--fallback-resolution`
+  PDF fallback resolution used by `ggsave`; mainly relevant for rendering quality and file export.
+
+### FROH in the outputs
+
+The script reports FROH for both raw and bridged ROH using segment cutoffs:
+- `>100 kb`
+- `>1 Mb`
+- `>5 Mb`
+
+The genome size denominator is:
+- `number_of_windows * 100,000 bp`
+
+### Recommended defaults
+
+- Start by matching the threshold used to make the windows file, for example a `0.25` HEARTY run with a conservative `--roh-threshold`.
+- Use the transversion-only windows file if you want a damage-robust view.
+- For most runs, start with:
+  `--min-length-mb 20`
+  `--max-scaffolds 40`
+  `--fill-cap 0.0005`
+  `--bin-size-bp 500000`
+  `--fallback-resolution 100`
+  `--roh-threshold 0.0001`
+- If the PDF is too large:
+  increase `--bin-size-bp` such as `1000000`
+  reduce `--max-scaffolds` such as `20`
+  lower `--fallback-resolution` such as `80`
 
 ## PSMC Helper
 
