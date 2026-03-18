@@ -33,8 +33,6 @@ OPTIONAL ARGUMENTS:
     -m, --min-depth INT        Minimum depth for downstream summaries [default: 10]
     -M, --max-depth INT        Maximum depth for downstream summaries
     -t, --threshold FLOAT      Extra het calling threshold for window outputs (can be repeated; 0.05 always runs internally)
-    -T, --threshold-list FILE  File with thresholds, one per line
-    -R, --roh-min FLOAT        Threshold used in output filenames [default: 0.2]
     -c, --cores INT            Number of ANGSD/compression threads [default: 8]
     --angsd PATH               ANGSD executable [default: auto]
 REGION SPECIFICATION (choose one):
@@ -173,7 +171,7 @@ def coverage_tag(min_depth, max_depth):
     return tag
 
 
-def build_outputs(prefix, outdir, min_depth, max_depth, output_thresholds, roh_min):
+def build_outputs(prefix, outdir, min_depth, max_depth, output_thresholds):
     output_dir = Path(outdir)
     plots_dir = output_dir / "plots"
     cov_tag = coverage_tag(min_depth, max_depth)
@@ -571,7 +569,7 @@ def run_single_bam(bam_path, prefix, args):
 
     requested_thresholds = args.threshold if args.threshold else [0.05]
     output_thresholds = [threshold for threshold in requested_thresholds if threshold != DEFAULT_THRESHOLD]
-    outputs = build_outputs(prefix, args.outdir, args.min_depth, args.max_depth, output_thresholds, args.roh_min)
+    outputs = build_outputs(prefix, args.outdir, args.min_depth, args.max_depth, output_thresholds)
 
     downstream_outputs = [
         *outputs["windows"].values(),
@@ -746,8 +744,7 @@ def main():
     optional.add_argument("-c", "--cores", type=int, default=8, metavar="INT", help="ANGSD/compression threads")
     optional.add_argument("--angsd", default=DEFAULT_ANGSD, metavar="PATH", help="ANGSD executable")
 
-    thresh_group = optional.add_mutually_exclusive_group()
-    thresh_group.add_argument(
+    optional.add_argument(
         "-t",
         "--threshold",
         type=float,
@@ -755,16 +752,6 @@ def main():
         default=[],
         metavar="FLOAT",
         help="Extra het calling threshold for window outputs (can be repeated; 0.05 always runs internally)",
-    )
-    thresh_group.add_argument("-T", "--threshold-list", metavar="FILE", help="File with thresholds")
-
-    optional.add_argument(
-        "-R",
-        "--roh-min",
-        type=float,
-        default=0.2,
-        metavar="FLOAT",
-        help="Threshold used in output filenames",
     )
 
     regions = parser.add_argument_group("Region specification (choose one)")
@@ -787,14 +774,8 @@ def main():
         print("Error: --out-prefix is required when using --bam", file=sys.stderr)
         sys.exit(1)
 
-    extra_thresholds = []
-    if args.threshold_list:
-        extra_thresholds = read_file_list(args.threshold_list, "thresholds")
-    elif args.threshold:
-        extra_thresholds = args.threshold
-
     thresholds = [DEFAULT_THRESHOLD]
-    for threshold in extra_thresholds:
+    for threshold in args.threshold:
         if threshold not in thresholds:
             thresholds.append(threshold)
     args.threshold = thresholds

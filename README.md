@@ -93,8 +93,6 @@ Optional arguments:
   -m, --min-depth INT        Minimum depth for downstream summaries [default: 10]
   -M, --max-depth INT        Maximum depth for downstream summaries
   -t, --threshold FLOAT      Extra het calling threshold for window outputs (can be repeated; 0.05 always runs internally)
-  -T, --threshold-list FILE  File with thresholds, one per line
-  -R, --roh-min FLOAT        Threshold used in output filenames [default: 0.2]
   -c, --cores INT            Number of ANGSD/compression threads [default: 8]
   --angsd PATH               ANGSD executable [default: auto]
   -r, --regions STR          Region string for ANGSD -r
@@ -273,7 +271,7 @@ Useful options:
 ## Notes
 
 - `0.05` is always included internally so you can inspect the exploratory minor allele frequency spectrum before choosing stricter thresholds.
-- Window outputs are only written for thresholds you explicitly request with `-t` or `--threshold-list`.
+- Window outputs are only written for thresholds you explicitly request with `-t`.
 - The raw basecall table is intentionally left unfiltered for coverage so you can rerun downstream summaries with different `--min-depth` and `--max-depth` values.
 - `plot_minorfreq.R`, `roh_plot_tool.R`, and `psmc_tool.sh` are standalone helpers and can be run independently of the main HEARTY workflow once the relevant HEARTY outputs exist.
 
@@ -288,7 +286,6 @@ Useful options:
 ## Examples Directory
 
 - `example_bam_list.txt` - sample BAM list format
-- `example_thresholds.txt` - sample extra-threshold file
 
 ## Contact
 
