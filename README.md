@@ -1,119 +1,294 @@
-# Hetcaller
+# HEARTY
 
-Hetcaller is a Snakemake-based pipeline for analyzing heterozygosity and identifying runs of homozygosity (ROH) from BAM files using ANGSD.
+HEARTY (Heterozygosity Error and Ancient-damage Robust Thresholding sYstem) is a lightweight toolkit for profiling heterozygosity from BAM files with ANGSD, assessing the impact of sequencing error and ancient DNA damage, choosing empirical heterozygosity thresholds, and carrying those choices into downstream ROH and PSMC workflows.
+
+The main idea is:
+- build one reusable basecall table from ANGSD counts
+- always inspect the exploratory `0.05` threshold
+- add stricter thresholds when needed
+- regenerate downstream summaries with different depth filters without rerunning ANGSD
 
 ## Features
 
-- **Heterozygosity calling** at customizable thresholds
-- **ROH detection** with configurable minimum thresholds
-- **Transversion-only analysis** to reduce bias from damage patterns
-- **Minor allele frequency analysis** with visualizations
-- **Batch processing** of multiple BAM files
-- **Flexible region specification** (whole genome, chromosomes, or custom regions)
+- Heterozygosity calling with a fixed exploratory `0.05` threshold plus optional extra thresholds
+- One reusable basecall table per sample with threshold-specific call columns
+- 100 kb window heterozygosity summaries for all sites and transversions only
+- Consolidated minor allele frequency summaries for threshold exploration
+- Standalone plotting tools for minor allele frequency and ROH/window summaries
+- Standalone PSMC helper that uses HEARTY threshold-specific het calls for masking
+- Batch processing for both BAM inputs and minorfreq/ROH plotting
+
+## Installation
+
+```bash
+git clone https://github.com/BiodiversityExtinction/HEARTY.git
+cd HEARTY
+chmod +x hearty.py
+chmod +x psmc_tool.sh
+```
 
 ## Requirements
 
-### Software Dependencies
-- Python 3.x with packages:
-  - `pyyaml`
-  - `snakemake`
+Core workflow:
+- Python 3.x
 - [ANGSD](http://www.popgen.dk/angsd/) (tested with v0.935)
-- R (tested with R 4.1.2) with packages:
-  - `ggplot2`
-  - `dplyr`
-  - `readr`
-  - `patchwork`
-  - `RColorBrewer`
-- Standard Unix tools: `bash`, `awk`, `grep`, `paste`, `zcat`
+- Standard Unix tools: `bash`, `awk`, `grep`, `paste`
+- `pigz` optional but recommended for multithreaded compression/decompression
 
-### Installation
+Plotting:
+- R
+- Packages used by `roh_plot_tool.R`: `tidyverse`, `ggplot2`
 
-1. Clone the repository:
+PSMC helper:
+- `bcftools`
+- `vcfutils.pl`
+- `seqtk`
+- `bedtools`
+- `fq2psmcfa`
+- `splitfa`
+- `psmc`
+
+## Main Tool
+
+`hearty.py` is the main caller.
+
+### Quick start
+
+Single BAM:
+
 ```bash
-git clone https://github.com/Madshartmann1/Hetcaller.git
-cd Hetcaller
+python3 hearty.py -b sample.bam -o sample01
 ```
 
-2. Make hetcall.py executable:
+Single BAM with an extra stricter threshold:
+
 ```bash
-chmod +x hetcall.py
+python3 hearty.py -b sample.bam -o sample01 -t 0.25
 ```
 
-## Quick Start
+Region-restricted run:
 
-### Single BAM Analysis
 ```bash
-./hetcall.py -b sample.bam -o sample01
+python3 hearty.py -b sample.bam -o sample01 -r "chr1:1-50000000"
 ```
 
-### Multiple BAM Files
+Reuse an existing basecall file and only rebuild downstream summaries:
+
 ```bash
-# Create a BAM list file (one BAM per line)
-./hetcall.py -l bam_list.txt
+python3 hearty.py -b sample.bam -o sample01 -d . --reuse-existing -m 20 -M 60 -t 0.25
 ```
 
-### With Custom Thresholds
-```bash
-./hetcall.py -b sample.bam -o sample01 -t 0.05 -t 0.10 -t 0.15
-```
+### Usage
 
-### Region-specific Analysis
-```bash
-./hetcall.py -b sample.bam -o sample01 -r "chr1:1-50000000"
-```
+```text
+python3 hearty.py [OPTIONS]
 
-## Usage
+Required arguments:
+  -b, --bam FILE             BAM file for analysis
+  -l, --bam-list FILE        Two-column file: BAM path and output prefix
+  -o, --out-prefix STR       Output prefix for all files (required for single BAM)
 
-```
-hetcall [OPTIONS]
-
-Required Arguments:
-  -b, --bam FILE          BAM file for analysis (or use --bam-list)
-  -l, --bam-list FILE     File with BAM paths, one per line
-  -o, --out-prefix STR    Output prefix (required for single BAM)
-
-Optional Arguments:
-  -d, --outdir DIR        Output directory [default: results]
-  -s, --scripts DIR       Directory with required scripts [default: scripts]
-  -m, --min-depth INT     Minimum depth for ANGSD [default: 10]
-  -t, --threshold FLOAT   Het calling threshold (can be repeated) [default: 0.05]
+Optional arguments:
+  -d, --outdir DIR           Output directory [default: results]
+  -m, --min-depth INT        Minimum depth for downstream summaries [default: 10]
+  -M, --max-depth INT        Maximum depth for downstream summaries
+  -t, --threshold FLOAT      Extra het calling threshold for window outputs (can be repeated; 0.05 always runs internally)
   -T, --threshold-list FILE  File with thresholds, one per line
-  -R, --roh-min FLOAT     ROH minimum threshold [default: 0.2]
-  -c, --cores INT         Number of cores [default: 8]
-  -r, --regions STR       Region string for ANGSD (e.g., 'chr1:1-200000000')
-  -f, --rf FILE           Regions file (one scaffold per line)
-  -n, --dry-run           Show what would be done
-  -h, --help              Show detailed help
+  -R, --roh-min FLOAT        Threshold used in output filenames [default: 0.2]
+  -c, --cores INT            Number of ANGSD/compression threads [default: 8]
+  --angsd PATH               ANGSD executable [default: auto]
+  -r, --regions STR          Region string for ANGSD -r
+  -f, --rf FILE              Regions file for ANGSD -rf
+  -n, --dry-run              Show commands without executing them
+  -F, --force                Overwrite existing outputs
+  --reuse-existing           Reuse existing ANGSD/basecall outputs when available
+  -h, --help                 Show help
 ```
 
-## Output Files
+### BAM list format
 
-For each sample, Hetcaller generates:
+Each line must contain two columns:
 
-- `{prefix}.pos.gz` - Genomic positions analyzed
-- `{prefix}.counts.gz` - ANGSD allele counts
-- `{prefix}.basecall_{threshold}_mincov{depth}.txt` - Base calls at each position
-- `{prefix}_het{threshold}_thres{roh_min}.ROH.txt` - ROH analysis (all SNPs)
-- `{prefix}_het{threshold}_thres{roh_min}.ROH_trv.txt` - ROH analysis (transversions only)
-- `{prefix}.minorfreq*.txt` - Minor allele frequency distributions
-- `plots/{prefix}_minorfreq_plots.pdf` - Visualization plots
-
-## BAM List Format
-
-Each line in the BAM list file should contain:
-```
-/path/to/sample.bam [optional_prefix]
+```text
+/path/to/sample.bam sample_prefix
 ```
 
-If no prefix is provided, the BAM filename (without .bam extension) will be used.
+### Main outputs
 
-## Examples
+For each sample, HEARTY generates:
 
-See the `examples/` directory for:
-- `example_config.yaml` - Sample configuration file
-- `example_bam_list.txt` - Sample BAM list format
-- `example_thresholds.txt` - Sample threshold file
+- `{prefix}.pos.gz` - genomic positions from ANGSD
+- `{prefix}.counts.gz` - A/C/G/T counts from ANGSD
+- `{prefix}.basecall.txt.gz` - unfiltered basecall table with shared frequencies plus per-threshold call/status columns
+- `{prefix}_het{threshold}.mincov{depth}[ _maxcov{depth} ].windows.txt.gz` - 100 kb window heterozygosity summary for explicitly requested `-t` thresholds
+- `{prefix}_het{threshold}.mincov{depth}[ _maxcov{depth} ].windows_trv.txt.gz` - 100 kb transversion-only window heterozygosity summary for explicitly requested `-t` thresholds
+- `{prefix}.mincov{depth}[ _maxcov{depth} ].minorfreq.txt` - consolidated minor allele frequency table after downstream depth filtering
 
+Important behavior:
+- `0.05` always runs internally for the exploratory minor allele frequency output, even if you only specify stricter thresholds
+- `--min-depth` and `--max-depth` are applied downstream from the raw basecall table, not during ANGSD counting
+- `--reuse-existing` lets you rebuild downstream summaries from an existing basecall file without rerunning ANGSD
+- if you rerun with `--reuse-existing` and request a new threshold, HEARTY will rebuild the basecall table from the existing `.pos.gz` and `.counts.gz` files and keep the old threshold columns
+
+### Basecall format
+
+The basecall table is gzip-compressed and tab-delimited. It contains:
+
+- position columns copied from `pos.gz` such as `chr`, `pos`, `totDepth`
+- frequency columns: `A`, `C`, `G`, `T`
+- for each threshold:
+  - `Base_<threshold>`
+  - `Status_<threshold>`
+
+Example threshold-specific columns:
+
+```text
+Base_0.05   Status_0.05   Base_0.25   Status_0.25
+```
+
+This is the format expected by `psmc_tool.sh`.
+
+## Minor Frequency Plotting
+
+`plot_minorfreq.R` plots the consolidated minorfreq table produced by HEARTY.
+
+### Single-sample usage
+
+```bash
+Rscript plot_minorfreq.R \
+  --minorfreq-file results/sample01.mincov10.minorfreq.txt \
+  --out results/plots/sample01 \
+  --format pdf
+```
+
+With capped y-axis based on the tail:
+
+```bash
+Rscript plot_minorfreq.R \
+  --minorfreq-file results/sample01.mincov10.minorfreq.txt \
+  --out results/plots/sample01 \
+  --format pdf \
+  --y-cap-after-x 0.25
+```
+
+### Batch usage
+
+```bash
+Rscript plot_minorfreq.R \
+  --sample-list minorfreq_batch.txt \
+  --format pdf \
+  --y-cap-after-x 0.25
+```
+
+Batch list format:
+
+```text
+/path/sample1.mincov10.minorfreq.txt   results/plots/sample1
+/path/sample2.mincov10.minorfreq.txt   results/plots/sample2
+```
+
+Outputs:
+- `<output_prefix>_minorfreq_overlay.<format>`
+- `<output_prefix>_minorfreq_summary.txt`
+
+The plotting input is the single consolidated HEARTY `*.minorfreq.txt` table with columns:
+- `freq`
+- `AC`, `AG`, `AT`, `CG`, `CT`, `GT`
+- `total`
+- `transition`
+- `transversion`
+
+## ROH / Window Plotting
+
+`roh_plot_tool.R` takes HEARTY `*.windows.txt.gz` files and plots windowed heterozygosity / derived ROH patterns.
+
+### Single-sample usage
+
+```bash
+Rscript roh_plot_tool.R \
+  --mode single \
+  --input results/sample01_het0.25.mincov10.windows.txt.gz \
+  --output-pdf results/plots/sample01_roh.pdf
+```
+
+### Batch usage
+
+```bash
+Rscript roh_plot_tool.R \
+  --mode batch \
+  --sample-list roh_samples.tsv \
+  --summary-out roh_summary.tsv \
+  --combined-pdf roh_combined.pdf
+```
+
+Batch list format:
+
+```text
+sampleA<TAB>/path/sampleA_het0.25.mincov10.windows.txt.gz
+sampleB<TAB>/path/sampleB_het0.25.mincov10.windows.txt.gz
+```
+
+Common tuning arguments:
+- `--min-length-mb`
+- `--max-scaffolds`
+- `--fill-cap`
+- `--bin-size-bp`
+- `--fallback-resolution`
+- `--roh-threshold`
+
+## PSMC Helper
+
+`psmc_tool.sh` prepares masked PSMC input using a HEARTY basecall table and a chosen threshold column.
+
+### Usage
+
+```bash
+bash psmc_tool.sh \
+  --prefix SAMPLE \
+  --out-dir /path/to/output_dir \
+  --bam /path/to/sample.bam \
+  --threads 8 \
+  --bed /path/to/regions.bed \
+  --reference /path/to/reference.fa \
+  --min-coverage 10 \
+  --het-file /path/to/sample.basecall.txt.gz \
+  --threshold 0.25
+```
+
+What it does:
+- builds a diploid fastq with `bcftools`
+- extracts HEARTY-supported het sites from `Status_<threshold>`
+- compares those against `seqtk listhet`
+- masks unsupported candidate hets
+- runs `psmc`
+- optionally runs bootstrap replicates
+
+Useful options:
+- `--threshold 0.25`
+- `--bootstrap-rounds 50`
+- `--skip-bootstrap`
+- `--skip-diploid`
+- `--skip-mask`
+
+## Notes
+
+- `0.05` is always included internally so you can inspect the exploratory minor allele frequency spectrum before choosing stricter thresholds.
+- Window outputs are only written for thresholds you explicitly request with `-t` or `--threshold-list`.
+- The raw basecall table is intentionally left unfiltered for coverage so you can rerun downstream summaries with different `--min-depth` and `--max-depth` values.
+- `plot_minorfreq.R`, `roh_plot_tool.R`, and `psmc_tool.sh` are standalone helpers and can be run independently of the main HEARTY workflow once the relevant HEARTY outputs exist.
+
+## Repository Layout
+
+- `hearty.py` - main HEARTY caller
+- `plot_minorfreq.R` - minor allele frequency overlay plotter
+- `roh_plot_tool.R` - ROH/window plotting utility
+- `psmc_tool.sh` - PSMC preparation and run helper
+- `examples/` - example input files
+
+## Examples Directory
+
+- `example_bam_list.txt` - sample BAM list format
+- `example_thresholds.txt` - sample extra-threshold file
 
 ## Contact
 
