@@ -281,12 +281,4 @@ Useful options:
 - `plot_minorfreq.R` - minor allele frequency overlay plotter
 - `roh_plot_tool.R` - ROH/window plotting utility
 - `psmc_tool.sh` - PSMC preparation and run helper
-- `examples/` - example input files
 
-## Examples Directory
-
-- `example_bam_list.txt` - sample BAM list format
-
-## Contact
-
-madhar@dtu.dk
