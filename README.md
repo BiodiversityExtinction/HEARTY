@@ -379,6 +379,14 @@ The genome size denominator is:
 
 `PSMC_Tool.sh` prepares masked PSMC input using a HEARTY basecall table and a chosen threshold column, and then runs PSMC on the masked result.
 
+### Basic usage
+
+Show help:
+
+```bash
+bash PSMC_Tool.sh --help
+```
+
 ### Usage
 
 ```bash
@@ -395,6 +403,24 @@ bash PSMC_Tool.sh \
   --threshold 0.25
 ```
 
+Full example with explicit masking and bootstrap settings:
+
+```bash
+bash PSMC_Tool.sh \
+  --prefix SampleA \
+  --out-dir PSMC_out \
+  --bam /path/to/SampleA.bam \
+  --threads 8 \
+  --bed /path/to/regions.bed \
+  --reference /path/to/reference.fa \
+  --min-coverage-diploid 10 \
+  --min-depth-goodhets 10 \
+  --max-depth-goodhets 80 \
+  --het-file /path/to/SampleA.basecall.txt.gz \
+  --threshold 0.25 \
+  --bootstrap-rounds 50
+```
+
 What it does:
 - builds a diploid fastq with `bcftools`
 - extracts HEARTY-supported het sites from `Status_<threshold>`
@@ -403,15 +429,106 @@ What it does:
 - runs `psmc`
 - optionally runs bootstrap replicates
 
-Useful options:
+So the workflow is:
+1. build a diploid fastq backbone from the BAM
+2. keep only HEARTY-supported heterozygous sites from the basecall table
+3. mask candidate hets seen by `seqtk` that are not supported by HEARTY
+4. convert the masked fastq into `psmcfa`
+5. run the main PSMC analysis
+6. optionally run bootstrap replicates and combine them
+
+### Required inputs
+
+- `--prefix`
+  Sample name used as the output stem.
+- `--out-dir`
+  Output directory for all intermediate and final files.
+- `--bam`
+  Input BAM file used to build the diploid fastq backbone.
+- `--threads`
+  Number of threads for `bcftools` and number of parallel bootstrap jobs.
+- `--bed`
+  BED file of regions passed to `bcftools mpileup -R`.
+- `--reference`
+  Reference fasta used by `bcftools mpileup`.
+- `--min-coverage-diploid`
+  Minimum coverage used by `vcfutils.pl vcf2fq -d` when constructing the diploid fastq.
+- `--min-depth-goodhets`
+  Minimum `totDepth` retained from the HEARTY basecall file when extracting trusted heterozygous sites.
+- `--het-file`
+  HEARTY basecall table, either `.txt` or `.txt.gz`.
+- `--threshold`
+  Threshold column to use from the HEARTY basecall table, for example `0.25` for `Status_0.25`.
+
+### Parameter meanings
+
+- `--min-coverage-diploid`
+  Coverage threshold for the diploid fastq generation step.
+  This affects the underlying PSMC sequence backbone.
+- `--min-depth-goodhets`
+  Minimum depth required for a HEARTY HET site to be retained in `goodhets.bed`.
+  This affects which heterozygous sites are preserved rather than masked.
+- `--max-depth-goodhets`
+  Optional upper depth cutoff for the HEARTY-supported het list.
+  Useful for excluding suspicious high-depth sites.
+- `--threshold`
+  Selects which `Status_<threshold>` column is used from the HEARTY basecall file.
+  This is the most important biological choice for how strict the heterozygous masking is.
+- `--bootstrap-rounds`
+  Number of bootstrap PSMC replicates to run after the main analysis.
+- `--psmc-args`
+  Raw argument string passed to `psmc`.
+  Use this if you want to change the demographic patterning parameters.
+- `--skip-diploid`
+  Reuse an existing diploid fastq instead of rebuilding it.
+- `--skip-mask`
+  Reuse an existing masked fastq and existing `psmcfa` intermediates.
+- `--skip-bootstrap`
+  Skip the bootstrap replicate stage.
+
+### Main outputs
+
+The script writes:
+- `<prefix>_diploid.fq.gz`
+  Diploid fastq generated from the BAM.
+- `<prefix>_goodhets.bed`
+  HEARTY-supported heterozygous sites retained after the `goodhets` depth filter.
+- `<prefix>_bcfhets.bed`
+  Candidate heterozygous sites found from the diploid fastq with `seqtk listhet`.
+- `<prefix>_Tomask.bed`
+  Candidate hets to mask because they were seen in the diploid fastq but not supported by HEARTY.
+- `<prefix>_diploid_masked.fq.gz`
+  Masked diploid fastq used for PSMC conversion.
+- `<prefix>.psmcfa`
+  Main PSMC input file.
+- `<prefix>.split.psmcfa`
+  Split PSMC input used for bootstraps.
+- `<prefix>.psmc`
+  Primary PSMC result.
+- `<prefix>.round-<n>.psmc`
+  Bootstrap replicate outputs.
+- `<prefix>.combined.psmc`
+  Combined file containing the main run plus bootstrap replicates.
+
+### Recommended defaults
+
+For most runs, start with:
 - `--threshold 0.25`
 - `--min-coverage-diploid 10`
 - `--min-depth-goodhets 10`
-- `--max-depth-goodhets 80`
 - `--bootstrap-rounds 50`
-- `--skip-bootstrap`
-- `--skip-diploid`
-- `--skip-mask`
+
+Add:
+- `--max-depth-goodhets 80`
+
+if you want to exclude very high-depth sites from the retained HET list.
+
+### Practical guidance
+
+- Keep `--threshold` matched to the HEARTY threshold you trust from the minor allele frequency plots.
+- If you rerun PSMC repeatedly while tuning only the masking logic, `--skip-diploid` can save time.
+- If you already have the masked fastq and `psmcfa` files you want, `--skip-mask` can skip straight to PSMC.
+- If you only want the main run first, use `--skip-bootstrap` and add bootstraps later.
 
 ## Notes
 
