@@ -14,7 +14,8 @@ Usage:
     --threads 8 \
     --bed /path/to/regions.bed \
     --reference /path/to/reference.fa \
-    --min-coverage 10 \
+    --min-coverage-diploid 10 \
+    --min-depth-goodhets 10 \
     --het-file /path/to/sample.basecall.txt.gz \
     --threshold 0.25
 
@@ -25,10 +26,15 @@ Required arguments:
   --threads           Number of threads / parallel bootstrap jobs
   --bed               BED file of regions passed to bcftools mpileup -R
   --reference         Reference fasta
-  --min-coverage      Minimum coverage used by vcfutils.pl vcf2fq -d
+  --min-coverage-diploid
+                      Minimum coverage used by vcfutils.pl vcf2fq -d
+  --min-depth-goodhets
+                      Minimum totDepth retained from HEARTY basecall file
   --het-file          HEARTY basecall file (.txt or .txt.gz)
 
 Optional arguments:
+  --max-depth-goodhets
+                      Maximum totDepth retained from HEARTY basecall file
   --threshold         Threshold column to use from HEARTY basecall file [default: 0.25]
   --bootstrap-rounds  Number of bootstrap replicates [default: 50]
   --psmc-args         Quoted PSMC arguments [default: -N25 -t10 -r5 -p 4+25*2+4+6]
@@ -77,7 +83,9 @@ bam=""
 threads=""
 bed=""
 reference=""
-min_coverage=""
+min_coverage_diploid=""
+min_depth_goodhets=""
+max_depth_goodhets=""
 het_file=""
 threshold="0.25"
 bootstrap_rounds=50
@@ -94,7 +102,9 @@ while [[ $# -gt 0 ]]; do
     --threads) threads="${2:-}"; shift 2 ;;
     --bed) bed="${2:-}"; shift 2 ;;
     --reference) reference="${2:-}"; shift 2 ;;
-    --min-coverage) min_coverage="${2:-}"; shift 2 ;;
+    --min-coverage-diploid) min_coverage_diploid="${2:-}"; shift 2 ;;
+    --min-depth-goodhets) min_depth_goodhets="${2:-}"; shift 2 ;;
+    --max-depth-goodhets) max_depth_goodhets="${2:-}"; shift 2 ;;
     --het-file) het_file="${2:-}"; shift 2 ;;
     --threshold) threshold="${2:-}"; shift 2 ;;
     --bootstrap-rounds) bootstrap_rounds="${2:-}"; shift 2 ;;
@@ -118,13 +128,19 @@ done
 [[ -n "$threads" ]] || die "--threads is required"
 [[ -n "$bed" ]] || die "--bed is required"
 [[ -n "$reference" ]] || die "--reference is required"
-[[ -n "$min_coverage" ]] || die "--min-coverage is required"
+[[ -n "$min_coverage_diploid" ]] || die "--min-coverage-diploid is required"
+[[ -n "$min_depth_goodhets" ]] || die "--min-depth-goodhets is required"
 [[ -n "$het_file" ]] || die "--het-file is required"
 [[ -n "$threshold" ]] || die "--threshold is required"
 
 [[ "$threads" =~ ^[0-9]+$ ]] || die "--threads must be an integer"
 [[ "$bootstrap_rounds" =~ ^[0-9]+$ ]] || die "--bootstrap-rounds must be an integer"
-[[ "$min_coverage" =~ ^[0-9]+$ ]] || die "--min-coverage must be an integer"
+[[ "$min_coverage_diploid" =~ ^[0-9]+$ ]] || die "--min-coverage-diploid must be an integer"
+[[ "$min_depth_goodhets" =~ ^[0-9]+$ ]] || die "--min-depth-goodhets must be an integer"
+if [[ -n "$max_depth_goodhets" ]]; then
+  [[ "$max_depth_goodhets" =~ ^[0-9]+$ ]] || die "--max-depth-goodhets must be an integer"
+  (( max_depth_goodhets >= min_depth_goodhets )) || die "--max-depth-goodhets must be >= --min-depth-goodhets"
+fi
 
 [[ -f "$bam" ]] || die "BAM file not found: $bam"
 [[ -f "$bed" ]] || die "BED file not found: $bed"
@@ -170,7 +186,7 @@ if [[ "$skip_diploid" -eq 1 ]]; then
 else
   bcftools mpileup -q 20 -Q 20 --threads "$threads" -Ou -R "$bed" -f "$reference" "$bam" \
     | bcftools call --threads "$threads" -c - \
-    | vcfutils.pl vcf2fq -d "$min_coverage" \
+    | vcfutils.pl vcf2fq -d "$min_coverage_diploid" \
     | gzip > "$diploid_fq"
 fi
 
@@ -181,19 +197,35 @@ if [[ "$skip_mask" -eq 1 ]]; then
   [[ -f "$split_psmcfa" ]] || die "--skip-mask was set but split psmcfa is missing: $split_psmcfa"
 else
   "${het_cat[@]}" \
-    | awk -v status_col="$status_col" '
+    | awk -v status_col="$status_col" -v min_depth="$min_depth_goodhets" -v max_depth="${max_depth_goodhets:-}" '
         BEGIN { FS = OFS = "\t" }
         NR == 1 {
           for (i = 1; i <= NF; i++) {
             if ($i == status_col) {
               status_idx = i
             }
+            if ($i == "totDepth") {
+              depth_idx = i
+            }
           }
           if (status_idx == 0) {
             printf("Error: Could not find column %s in basecall file\n", status_col) > "/dev/stderr"
             exit 1
           }
+          if (depth_idx == 0) {
+            printf("Error: Could not find totDepth column in basecall file\n") > "/dev/stderr"
+            exit 1
+          }
           next
+        }
+        {
+          depth = $depth_idx + 0
+          if (depth < min_depth) {
+            next
+          }
+          if (max_depth != "" && depth > max_depth) {
+            next
+          }
         }
         $status_idx ~ /^HET/ { print $1, $2, $2 }
       ' > "$goodhets_bed"

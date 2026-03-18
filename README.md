@@ -248,7 +248,8 @@ bash psmc_tool.sh \
   --threads 8 \
   --bed /path/to/regions.bed \
   --reference /path/to/reference.fa \
-  --min-coverage 10 \
+  --min-coverage-diploid 10 \
+  --min-depth-goodhets 10 \
   --het-file /path/to/sample.basecall.txt.gz \
   --threshold 0.25
 ```
@@ -263,6 +264,9 @@ What it does:
 
 Useful options:
 - `--threshold 0.25`
+- `--min-coverage-diploid 10`
+- `--min-depth-goodhets 10`
+- `--max-depth-goodhets 80`
 - `--bootstrap-rounds 50`
 - `--skip-bootstrap`
 - `--skip-diploid`
@@ -282,3 +286,6 @@ Useful options:
 - `roh_plot_tool.R` - ROH/window plotting utility
 - `psmc_tool.sh` - PSMC preparation and run helper
 
+## Contact
+
+micwe@dtu.dk
