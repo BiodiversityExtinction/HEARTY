@@ -9,7 +9,7 @@ args <- commandArgs(trailingOnly = TRUE)
 
 usage <- paste(
   "Usage:",
-  "  Rscript roh_plot_tool.R --mode <single|batch> [options]",
+  "  Rscript ROH_Plot_Tool.R --mode <single|batch> [options]",
   "",
   "Modes:",
   "  single: one window-summary txt -> one PDF",

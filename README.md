@@ -23,8 +23,8 @@ The main idea is:
 ```bash
 git clone https://github.com/BiodiversityExtinction/HEARTY.git
 cd HEARTY
-chmod +x hearty.py
-chmod +x psmc_tool.sh
+chmod +x HEARTY.py
+chmod +x PSMC_Tool.sh
 ```
 
 ## Requirements
@@ -37,7 +37,7 @@ Core workflow:
 
 Plotting:
 - R
-- Packages used by `roh_plot_tool.R`: `tidyverse`, `ggplot2`
+- Packages used by `ROH_Plot_Tool.R`: `tidyverse`, `ggplot2`
 
 PSMC helper:
 - `bcftools`
@@ -50,38 +50,38 @@ PSMC helper:
 
 ## Main Tool
 
-`hearty.py` is the main caller.
+`HEARTY.py` is the main caller.
 
 ### Quick start
 
 Single BAM:
 
 ```bash
-python3 hearty.py -b sample.bam -o sample01
+python3 HEARTY.py -b sample.bam -o sample01
 ```
 
 Single BAM with an extra stricter threshold:
 
 ```bash
-python3 hearty.py -b sample.bam -o sample01 -t 0.25
+python3 HEARTY.py -b sample.bam -o sample01 -t 0.25
 ```
 
 Region-restricted run:
 
 ```bash
-python3 hearty.py -b sample.bam -o sample01 -r "chr1:1-50000000"
+python3 HEARTY.py -b sample.bam -o sample01 -r "chr1:1-50000000"
 ```
 
 Reuse an existing basecall file and only rebuild downstream summaries:
 
 ```bash
-python3 hearty.py -b sample.bam -o sample01 -d . --reuse-existing -m 20 -M 60 -t 0.25
+python3 HEARTY.py -b sample.bam -o sample01 -d . --reuse-existing -m 20 -M 60 -t 0.25
 ```
 
 ### Usage
 
 ```text
-python3 hearty.py [OPTIONS]
+python3 HEARTY.py [OPTIONS]
 
 Required arguments:
   -b, --bam FILE             BAM file for analysis
@@ -144,16 +144,16 @@ Example threshold-specific columns:
 Base_0.05   Status_0.05   Base_0.25   Status_0.25
 ```
 
-This is the format expected by `psmc_tool.sh`.
+This is the format expected by `PSMC_Tool.sh`.
 
 ## Minor Frequency Plotting
 
-`plot_minorfreq.R` plots the consolidated minorfreq table produced by HEARTY.
+`Plot_MinorFreq.R` plots the consolidated minorfreq table produced by HEARTY.
 
 ### Single-sample usage
 
 ```bash
-Rscript plot_minorfreq.R \
+Rscript Plot_MinorFreq.R \
   --minorfreq-file results/sample01.mincov10.minorfreq.txt \
   --out results/plots/sample01 \
   --format pdf
@@ -162,7 +162,7 @@ Rscript plot_minorfreq.R \
 With capped y-axis based on the tail:
 
 ```bash
-Rscript plot_minorfreq.R \
+Rscript Plot_MinorFreq.R \
   --minorfreq-file results/sample01.mincov10.minorfreq.txt \
   --out results/plots/sample01 \
   --format pdf \
@@ -172,7 +172,7 @@ Rscript plot_minorfreq.R \
 ### Batch usage
 
 ```bash
-Rscript plot_minorfreq.R \
+Rscript Plot_MinorFreq.R \
   --sample-list minorfreq_batch.txt \
   --format pdf \
   --y-cap-after-x 0.25
@@ -198,12 +198,12 @@ The plotting input is the single consolidated HEARTY `*.minorfreq.txt` table wit
 
 ## ROH / Window Plotting
 
-`roh_plot_tool.R` takes HEARTY `*.windows.txt.gz` files and plots windowed heterozygosity / derived ROH patterns.
+`ROH_Plot_Tool.R` takes HEARTY `*.windows.txt.gz` files and plots windowed heterozygosity / derived ROH patterns.
 
 ### Single-sample usage
 
 ```bash
-Rscript roh_plot_tool.R \
+Rscript ROH_Plot_Tool.R \
   --mode single \
   --input results/sample01_het0.25.mincov10.windows.txt.gz \
   --output-pdf results/plots/sample01_roh.pdf
@@ -212,7 +212,7 @@ Rscript roh_plot_tool.R \
 ### Batch usage
 
 ```bash
-Rscript roh_plot_tool.R \
+Rscript ROH_Plot_Tool.R \
   --mode batch \
   --sample-list roh_samples.tsv \
   --summary-out roh_summary.tsv \
@@ -236,12 +236,12 @@ Common tuning arguments:
 
 ## PSMC Helper
 
-`psmc_tool.sh` prepares masked PSMC input using a HEARTY basecall table and a chosen threshold column.
+`PSMC_Tool.sh` prepares masked PSMC input using a HEARTY basecall table and a chosen threshold column.
 
 ### Usage
 
 ```bash
-bash psmc_tool.sh \
+bash PSMC_Tool.sh \
   --prefix SAMPLE \
   --out-dir /path/to/output_dir \
   --bam /path/to/sample.bam \
@@ -277,14 +277,14 @@ Useful options:
 - `0.05` is always included internally so you can inspect the exploratory minor allele frequency spectrum before choosing stricter thresholds.
 - Window outputs are only written for thresholds you explicitly request with `-t`.
 - The raw basecall table is intentionally left unfiltered for coverage so you can rerun downstream summaries with different `--min-depth` and `--max-depth` values.
-- `plot_minorfreq.R`, `roh_plot_tool.R`, and `psmc_tool.sh` are standalone helpers and can be run independently of the main HEARTY workflow once the relevant HEARTY outputs exist.
+- `Plot_MinorFreq.R`, `ROH_Plot_Tool.R`, and `PSMC_Tool.sh` are standalone helpers and can be run independently of the main HEARTY workflow once the relevant HEARTY outputs exist.
 
 ## Repository Layout
 
-- `hearty.py` - main HEARTY caller
-- `plot_minorfreq.R` - minor allele frequency overlay plotter
-- `roh_plot_tool.R` - ROH/window plotting utility
-- `psmc_tool.sh` - PSMC preparation and run helper
+- `HEARTY.py` - main HEARTY caller
+- `Plot_MinorFreq.R` - minor allele frequency overlay plotter
+- `ROH_Plot_Tool.R` - ROH/window plotting utility
+- `PSMC_Tool.sh` - PSMC preparation and run helper
 
 ## Contact
 

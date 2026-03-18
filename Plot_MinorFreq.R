@@ -5,13 +5,13 @@ args <- commandArgs(trailingOnly = TRUE)
 show_help <- function() {
   cat(
     paste(
-      "plot_minorfreq.R - Plot minor allele frequency overlays from HEARTY output",
+      "Plot_MinorFreq.R - Plot minor allele frequency overlays from HEARTY output",
       "",
       "Single-sample usage:",
-      "  Rscript plot_minorfreq.R --minorfreq-file <file> --out <output_prefix> [--format pdf|svg|png] [--log-y] [--y-cap-after-x FLOAT]",
+      "  Rscript Plot_MinorFreq.R --minorfreq-file <file> --out <output_prefix> [--format pdf|svg|png] [--log-y] [--y-cap-after-x FLOAT]",
       "",
       "Batch usage:",
-      "  Rscript plot_minorfreq.R --sample-list <list.txt> [--format pdf|svg|png] [--log-y] [--y-cap-after-x FLOAT]",
+      "  Rscript Plot_MinorFreq.R --sample-list <list.txt> [--format pdf|svg|png] [--log-y] [--y-cap-after-x FLOAT]",
       "",
       "Single-sample arguments:",
       "  --minorfreq-file   Path to HEARTY consolidated .minorfreq.txt file",

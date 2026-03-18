@@ -4,10 +4,10 @@ set -euo pipefail
 
 show_help() {
   cat <<'EOF'
-psmc_tool.sh - Prepare masked PSMC input using HEARTY heterozygous sites
+PSMC_Tool.sh - Prepare masked PSMC input using HEARTY heterozygous sites
 
 Usage:
-  bash psmc_tool.sh \
+  bash PSMC_Tool.sh \
     --prefix SAMPLE \
     --out-dir /path/to/output_dir \
     --bam /path/to/sample.bam \
