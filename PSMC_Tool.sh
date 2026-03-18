@@ -267,5 +267,16 @@ else
 fi
 
 log_step "Done"
-echo "Main output: $psmc_main"
-echo "Combined output: $combined_psmc"
+echo "PSMC threshold column: $status_col"
+echo "Diploid coverage cutoff: $min_coverage_diploid"
+echo "Goodhets depth filter: min=$min_depth_goodhets${max_depth_goodhets:+, max=$max_depth_goodhets}"
+echo "Generated files:"
+echo "  $diploid_fq"
+echo "  $goodhets_bed"
+echo "  $bcfhets_bed"
+echo "  $to_mask_bed"
+echo "  $masked_fq"
+echo "  $psmcfa"
+echo "  $split_psmcfa"
+echo "  $psmc_main"
+echo "  $combined_psmc"

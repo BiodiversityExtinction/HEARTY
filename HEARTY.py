@@ -192,7 +192,6 @@ def build_outputs(prefix, outdir, min_depth, max_depth, output_thresholds):
     }
     return {
         "outdir": output_dir,
-        "plots_dir": plots_dir,
         "pos_gz": pos_gz,
         "counts_gz": counts_gz,
         "basecall": basecall,
@@ -200,6 +199,19 @@ def build_outputs(prefix, outdir, min_depth, max_depth, output_thresholds):
         "windows_trv": windows_trv,
         "minorfreq": minorfreq,
     }
+
+
+def print_output_summary(prefix, outputs):
+    print(f"Completed sample: {prefix}")
+    print("Generated files:")
+    print(f"  {outputs['pos_gz']}")
+    print(f"  {outputs['counts_gz']}")
+    print(f"  {outputs['basecall']}")
+    print(f"  {outputs['minorfreq']['table']}")
+    for threshold, output_path in outputs["windows"].items():
+        print(f"  {output_path}")
+        trv_path = outputs["windows_trv"][threshold]
+        print(f"  {trv_path}")
 
 
 def iter_compressed_lines(path, compression):
@@ -711,7 +723,7 @@ def run_single_bam(bam_path, prefix, args):
             dry_run=args.dry_run,
         )
 
-    print(f"Successfully completed: {prefix}")
+    print_output_summary(prefix, outputs)
     return True
 
 

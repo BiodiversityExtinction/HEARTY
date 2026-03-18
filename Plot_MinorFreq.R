@@ -34,6 +34,22 @@ show_help <- function() {
   )
 }
 
+print_run_summary <- function(output_prefixes, fmt, log_y, y_cap_after_x) {
+  cat("Plot_MinorFreq.R completed\n")
+  cat(sprintf("Output format: %s\n", fmt))
+  cat(sprintf("Y axis mode: %s\n", if (log_y) "log10" else "linear"))
+  if (!is.na(y_cap_after_x)) {
+    cat(sprintf("Y cap rule: 2x highest count at freq >= %s\n", y_cap_after_x))
+  } else {
+    cat("Y cap rule: none\n")
+  }
+  cat("Generated files:\n")
+  for (prefix in output_prefixes) {
+    cat(sprintf("  %s_minorfreq_overlay.%s\n", prefix, fmt))
+    cat(sprintf("  %s_minorfreq_summary.txt\n", prefix))
+  }
+}
+
 parse_named_args <- function(x) {
   out <- list()
   i <- 1L
@@ -262,6 +278,7 @@ if (!is.null(opt[["sample-list"]])) {
     write_summary(d, output_prefix)
     plot_overlay(d, output_prefix, fmt, log_y, shared_y_max, pairs, cols)
   }
+  print_run_summary(sample_df$output_prefix, fmt, log_y, y_cap_after_x)
 } else {
   if (is.null(opt[["minorfreq-file"]]) || is.null(opt[["out"]])) {
     show_help()
@@ -273,4 +290,5 @@ if (!is.null(opt[["sample-list"]])) {
   y_max <- calc_y_max(built$panel_data, y_cap_after_x)
   write_summary(d, opt[["out"]])
   plot_overlay(d, opt[["out"]], fmt, log_y, y_max, pairs, cols)
+  print_run_summary(opt[["out"]], fmt, log_y, y_cap_after_x)
 }

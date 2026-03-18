@@ -8,6 +8,13 @@ The main idea is:
 - add stricter thresholds when needed
 - regenerate downstream summaries with different depth filters without rerunning ANGSD
 
+## Workflow Overview
+
+1. Run `HEARTY.py` to generate ANGSD counts, a reusable basecall table, the exploratory minor allele frequency table, and threshold-specific 100 kb window summaries.
+2. Use `Plot_MinorFreq.R` to inspect the exploratory `0.05` minor allele frequency spectrum and choose a stricter heterozygosity threshold.
+3. Use `ROH_Plot_Tool.R` to visualize the threshold-specific window summaries and inspect ROH-like patterns.
+4. Use `PSMC_Tool.sh` to prepare masked PSMC input from HEARTY outputs and run PSMC, including optional bootstrap replicates.
+
 ## Features
 
 - Heterozygosity calling with a fixed exploratory `0.05` threshold plus optional extra thresholds
@@ -15,7 +22,7 @@ The main idea is:
 - 100 kb window heterozygosity summaries for all sites and transversions only
 - Consolidated minor allele frequency summaries for threshold exploration
 - Standalone plotting tools for minor allele frequency and ROH/window summaries
-- Standalone PSMC helper that uses HEARTY threshold-specific het calls for masking
+- Standalone PSMC helper that uses HEARTY threshold-specific het calls for masking and runs PSMC
 - Batch processing for both BAM inputs and minorfreq/ROH plotting
 
 ## Installation
@@ -236,7 +243,7 @@ Common tuning arguments:
 
 ## PSMC Helper
 
-`PSMC_Tool.sh` prepares masked PSMC input using a HEARTY basecall table and a chosen threshold column.
+`PSMC_Tool.sh` prepares masked PSMC input using a HEARTY basecall table and a chosen threshold column, and then runs PSMC on the masked result.
 
 ### Usage
 
