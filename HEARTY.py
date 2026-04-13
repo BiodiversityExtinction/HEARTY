@@ -414,6 +414,7 @@ def minorfreq_from_basecall(basecall_gz, threshold, outputs, min_depth, max_dept
     g_idx = header_index["G"]
     t_idx = header_index["T"]
     pair_names = ("AC", "AG", "AT", "CG", "CT", "GT")
+    allele_idx = {"A": a_idx, "C": c_idx, "G": g_idx, "T": t_idx}
     counts = {}
     line_iter = iter_compressed_lines(basecall_gz, compression)
     next(line_iter)
@@ -424,10 +425,16 @@ def minorfreq_from_basecall(basecall_gz, threshold, outputs, min_depth, max_dept
         status = fields[status_idx]
         if not status.startswith("HET"):
             continue
-        trimmed = [fields[a_idx], fields[c_idx], fields[g_idx], fields[t_idx]]
-        trimmed.sort()
-        minor = trimmed[-3]
         pair = fields[base_idx]
+        if pair not in pair_names or len(pair) != 2:
+            continue
+        try:
+            pair_freqs = sorted(
+                [float(fields[allele_idx[pair[0]]]), float(fields[allele_idx[pair[1]]])]
+            )
+        except (ValueError, IndexError):
+            continue
+        minor = f"{pair_freqs[0]:.2f}" if pair_freqs[0] > 0 else "0"
         counts[(minor, pair)] = counts.get((minor, pair), 0) + 1
 
     by_minor = {}
