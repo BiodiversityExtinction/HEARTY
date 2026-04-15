@@ -311,6 +311,44 @@ Batch mode writes:
 - a summary TSV with FROH and plotting metadata for each sample
 - a combined PDF with multiple samples arranged together for comparison
 
+The batch summary TSV now includes:
+- `sample`
+  Sample name from the sample list.
+- `roh_file`
+  Input HEARTY windows file used for that sample.
+- `n_windows`
+  Number of parsed 100 kb windows in the input file.
+- `mean_heterozygosity_all_windows`
+  Mean heterozygosity proportion across all parsed windows.
+- `median_heterozygosity_all_windows`
+  Median heterozygosity proportion across all parsed windows.
+- `mean_heterozygosity_plotted_windows`
+  Mean heterozygosity proportion across the subset of windows that were actually plotted after scaffold-length filtering.
+- `median_heterozygosity_plotted_windows`
+  Median heterozygosity proportion across the subset of plotted windows.
+- `genome_bp_for_froh`
+  Genome-size denominator used for FROH, calculated as `n_windows * 100000`.
+- `roh_threshold`
+  ROH cutoff used for raw ROH calling in the summary.
+- `n_raw_segments`
+  Number of raw ROH segments before bridging.
+- `n_bridged_segments`
+  Number of ROH segments after single-bin bridging is applied.
+- `raw_froh_gt100kb`, `raw_froh_gt1Mb`, `raw_froh_gt5Mb`
+  FROH values from raw ROH segments longer than 100 kb, 1 Mb, and 5 Mb.
+- `bridged_froh_gt100kb`, `bridged_froh_gt1Mb`, `bridged_froh_gt5Mb`
+  FROH values from bridged ROH segments longer than 100 kb, 1 Mb, and 5 Mb.
+- `raw_roh_bp_gt100kb`, `raw_roh_bp_gt1Mb`, `raw_roh_bp_gt5Mb`
+  Total ROH base pairs contributing to each raw FROH class.
+- `bridged_roh_bp_gt100kb`, `bridged_roh_bp_gt1Mb`, `bridged_roh_bp_gt5Mb`
+  Total ROH base pairs contributing to each bridged FROH class.
+- `scaffolds_plotted`
+  Number of scaffolds retained for plotting after the minimum-length filter.
+- `rows_used_for_plot`
+  Number of original windows contributing to the plotted scaffolds.
+- `bin_size_bp_used`
+  Plotting bin size used when aggregating windows for the PDF.
+
 ### Required inputs
 
 - `--mode`
@@ -358,6 +396,12 @@ The script reports FROH for both raw and bridged ROH using segment cutoffs:
 
 The genome size denominator is:
 - `number_of_windows * 100,000 bp`
+
+In single-sample mode the script also prints:
+- mean heterozygosity across all parsed windows
+- median heterozygosity across all parsed windows
+- mean heterozygosity across plotted scaffolds only
+- median heterozygosity across plotted scaffolds only
 
 ### Recommended defaults
 
