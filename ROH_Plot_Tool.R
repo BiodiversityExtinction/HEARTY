@@ -130,6 +130,13 @@ calc_froh_bins <- function(seg_df, genome_size_bp) {
   tibble(metric = labels, roh_bp = roh_bp, froh = roh_bp / genome_size_bp)
 }
 
+calc_het_stats <- function(df) {
+  tibble(
+    mean_het = mean(df$prop, na.rm = TRUE),
+    median_het = median(df$prop, na.rm = TRUE)
+  )
+}
+
 build_window_flags <- function(df, roh_threshold) {
   df %>%
     arrange(chrom, start, end) %>%
@@ -291,6 +298,7 @@ if (identical(mode, "single")) {
   sample_label <- basename(input)
 
   df <- parse_roh_txt(input, fill_cap)
+  het_stats_all <- calc_het_stats(df)
   genome_bp <- nrow(df) * WINDOW_BP_FOR_FROH
   flags <- build_window_flags(df, roh_threshold)
   seg_raw <- calc_roh_segments(flags, "roh_raw")
@@ -299,11 +307,17 @@ if (identical(mode, "single")) {
   froh_br <- calc_froh_bins(seg_br, genome_bp)
 
   built <- build_single_plot_df(df, min_length_mb, max_scaffolds, bin_size_bp, roh_threshold)
+  plotted_df <- df %>% filter(chrom %in% unique(as.character(built$plot_df$chrom)))
+  het_stats_plotted <- calc_het_stats(plotted_df)
   plot_single(built$plot_df, sample_label, fill_cap, roh_threshold, fallback_resolution, out_pdf)
 
   cat(sprintf("Wrote PDF: %s\n", out_pdf))
   cat(sprintf("Input rows parsed: %d\n", nrow(df)))
+  cat(sprintf("Mean heterozygosity (all parsed windows): %.7f\n", het_stats_all$mean_het))
+  cat(sprintf("Median heterozygosity (all parsed windows): %.7f\n", het_stats_all$median_het))
   cat(sprintf("Rows used for plotted scaffolds: %d\n", built$rows_used))
+  cat(sprintf("Mean heterozygosity (plotted scaffolds): %.7f\n", het_stats_plotted$mean_het))
+  cat(sprintf("Median heterozygosity (plotted scaffolds): %.7f\n", het_stats_plotted$median_het))
   cat(sprintf("Scaffolds plotted: %d (min length %.2f Mb; max panels %d)\n", built$scaffolds_plotted, min_length_mb, max_scaffolds))
   cat(sprintf("Bin size used: %.0f bp\n", built$bin_size))
   cat(sprintf("PDF fallback resolution: %d dpi\n", fallback_resolution))
@@ -335,6 +349,7 @@ if (identical(mode, "single")) {
     sid <- samples$sample[[i]]
     path <- samples$file[[i]]
     df <- parse_roh_txt(path, fill_cap)
+    het_stats_all <- calc_het_stats(df)
 
     genome_bp <- nrow(df) * WINDOW_BP_FOR_FROH
     flags <- build_window_flags(df, roh_threshold)
@@ -349,12 +364,16 @@ if (identical(mode, "single")) {
     br_bp_map <- setNames(froh_br$roh_bp, froh_br$metric)
 
     built <- build_batch_plot_df(df, sid, min_length_mb, max_scaffolds, bin_size_bp, roh_threshold)
+    plotted_df <- df %>% filter(chrom %in% unique(built$plot_df$chrom))
+    het_stats_plotted <- if (nrow(plotted_df) > 0) calc_het_stats(plotted_df) else tibble(mean_het = NA_real_, median_het = NA_real_)
     if (nrow(built$plot_df) > 0) plot_rows[[length(plot_rows) + 1]] <- built$plot_df
 
     summary_rows[[length(summary_rows) + 1]] <- tibble(
       sample = sid,
       roh_file = path,
       n_windows = nrow(df),
+      mean_heterozygosity_all_windows = het_stats_all$mean_het,
+      median_heterozygosity_all_windows = het_stats_all$median_het,
       genome_bp_for_froh = genome_bp,
       roh_threshold = roh_threshold,
       n_raw_segments = nrow(seg_raw),
@@ -373,6 +392,8 @@ if (identical(mode, "single")) {
       bridged_roh_bp_gt5Mb = br_bp_map[["gt5Mb"]],
       scaffolds_plotted = built$n_chrom,
       rows_used_for_plot = built$rows_used,
+      mean_heterozygosity_plotted_windows = het_stats_plotted$mean_het,
+      median_heterozygosity_plotted_windows = het_stats_plotted$median_het,
       bin_size_bp_used = built$bin_size
     )
   }
