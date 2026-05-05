@@ -378,6 +378,10 @@ This gives you two related views:
   A window is treated as raw ROH if heterozygosity is less than or equal to this threshold.
 - `--fill-cap`
   Caps the displayed color scale at a maximum heterozygosity value so very high windows do not dominate the gradient. This changes the visualization, not the ROH calling itself.
+  You can also use `--fill-cap auto` to derive the cap from the mean heterozygosity of the input windows.
+- `--fill-cap-scale`
+  Multiplier applied when `--fill-cap auto` is used.
+  For example, `--fill-cap auto --fill-cap-scale 0.8` uses 80% of the mean heterozygosity as the display cap.
 - `--min-length-mb`
   Minimum scaffold length to include in the plot. Short scaffolds are excluded from the visual output.
 - `--max-scaffolds`
@@ -414,10 +418,16 @@ In single-sample mode the script also prints:
   `--bin-size-bp 500000`
   `--fallback-resolution 100`
   `--roh-threshold 0.0001`
+- For a visualization-driven adaptive scale, try:
+  `--fill-cap auto --fill-cap-scale 0.8`
 - If the PDF is too large:
   increase `--bin-size-bp` such as `1000000`
   reduce `--max-scaffolds` such as `20`
   lower `--fallback-resolution` such as `80`
+
+When `--fill-cap auto` is used:
+- in single mode, the cap is based on that sample
+- in batch mode, each sample gets its own cap for visualisation
 
 ## PSMC Helper
 

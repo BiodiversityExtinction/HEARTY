@@ -19,6 +19,7 @@ usage <- paste(
   "  --min-length-mb 20",
   "  --max-scaffolds 40",
   "  --fill-cap 0.0005",
+  "  --fill-cap-scale 1.0",
   "  --bin-size-bp 500000",
   "  --fallback-resolution 100",
   "  --roh-threshold 0.0001",
@@ -72,7 +73,7 @@ as_int <- function(x, nm) {
   v
 }
 
-parse_roh_txt <- function(path, fill_cap) {
+parse_roh_txt <- function(path) {
   if (!file.exists(path)) stop(sprintf("Input window-summary file not found: %s", path), call. = FALSE)
   lines <- readr::read_lines(path)
   df <- tibble(line = lines) %>%
@@ -82,10 +83,25 @@ parse_roh_txt <- function(path, fill_cap) {
       regex = "^\\s*(\\S+)\\s+(\\d+)-(\\d+):\\s+(\\d+)\\s+sites,\\s+(\\d+)\\s+sites\\s+with\\s+'HET',\\s+Proportion:\\s+([0-9.]+)\\s*$",
       convert = TRUE
     ) %>%
-    filter(!is.na(chrom), !is.na(start), !is.na(end), !is.na(prop)) %>%
-    mutate(prop_cap = pmin(prop, fill_cap))
+    filter(!is.na(chrom), !is.na(start), !is.na(end), !is.na(prop))
   if (nrow(df) == 0) stop(sprintf("No parsable rows in %s", path), call. = FALSE)
   df
+}
+
+resolve_fill_cap <- function(df_list, fill_cap_raw, fill_cap_scale) {
+  if (tolower(fill_cap_raw) != "auto") {
+    return(as_num(fill_cap_raw, "fill-cap"))
+  }
+  all_props <- unlist(lapply(df_list, function(d) d$prop), use.names = FALSE)
+  cap <- mean(all_props, na.rm = TRUE) * fill_cap_scale
+  if (!is.finite(cap) || cap <= 0) {
+    stop("Automatic fill-cap could not be calculated from the input windows", call. = FALSE)
+  }
+  cap
+}
+
+apply_fill_cap <- function(df, fill_cap) {
+  df %>% mutate(prop_cap = pmin(prop, fill_cap))
 }
 
 parse_sample_list <- function(path) {
@@ -250,7 +266,7 @@ build_batch_plot_df <- function(df, sample_id, min_length_mb, max_scaffolds, bin
   list(plot_df = pdat, n_chrom = nrow(sizes_sel), rows_used = nrow(d), bin_size = bin_size)
 }
 
-plot_batch <- function(plot_df_all, fill_cap, roh_threshold, fallback_resolution, out_pdf, sample_order) {
+plot_batch <- function(plot_df_all, roh_threshold, fallback_resolution, out_pdf, sample_order) {
   plot_df_all$sample <- factor(plot_df_all$sample, levels = sample_order, ordered = TRUE)
   sample_counts <- plot_df_all %>% distinct(sample, chrom) %>% count(sample, name = "n_panels") %>%
     mutate(sample_order = as.integer(sample), row_id = ((sample_order - 1) %/% 2) + 1)
@@ -260,7 +276,7 @@ plot_batch <- function(plot_df_all, fill_cap, roh_threshold, fallback_resolution
     geom_segment(data = dplyr::filter(plot_df_all, roh_hit_raw), aes(x = start_Mb, xend = end_Mb, y = y_raw_tick, yend = y_raw_tick), inherit.aes = FALSE, linewidth = 2.0, color = "black") +
     geom_segment(data = dplyr::filter(plot_df_all, roh_hit_bridged), aes(x = start_Mb, xend = end_Mb, y = y_bridged_tick, yend = y_bridged_tick), inherit.aes = FALSE, linewidth = 1.8, color = "#E69F00") +
     facet_wrap(~sample, ncol = 2, scales = "free") +
-    scale_fill_gradient(name = "HET proportion", limits = c(0, fill_cap), low = "red", high = "blue", na.value = "grey90") +
+    scale_fill_gradient(name = "HET proportion", low = "red", high = "blue", na.value = "grey90") +
     labs(x = "Position (Mb)", y = NULL,
          caption = sprintf("Black ticks: raw bins <= %.6f | Orange ticks: bridged ROH (single-bin gap filled if ROH on both sides)", roh_threshold)) +
     coord_cartesian(expand = FALSE) +
@@ -281,12 +297,13 @@ if (!mode %in% c("single", "batch")) stop("--mode must be either 'single' or 'ba
 
 min_length_mb <- as_num(get_opt("min-length-mb", "20"), "min-length-mb")
 max_scaffolds <- as_int(get_opt("max-scaffolds", "40"), "max-scaffolds")
-fill_cap <- as_num(get_opt("fill-cap", "0.0005"), "fill-cap")
+fill_cap_raw <- get_opt("fill-cap", "0.0005")
+fill_cap_scale <- as_num(get_opt("fill-cap-scale", "1.0"), "fill-cap-scale")
 bin_size_bp <- as_num(get_opt("bin-size-bp", "500000"), "bin-size-bp")
 fallback_resolution <- as_int(get_opt("fallback-resolution", "100"), "fallback-resolution")
 roh_threshold <- as_num(get_opt("roh-threshold", "0.0001"), "roh-threshold")
 
-if (min_length_mb <= 0 || max_scaffolds <= 0 || fill_cap <= 0 || bin_size_bp <= 0 || fallback_resolution <= 0 || roh_threshold < 0) {
+if (min_length_mb <= 0 || max_scaffolds <= 0 || fill_cap_scale <= 0 || bin_size_bp <= 0 || fallback_resolution <= 0 || roh_threshold < 0) {
   stop("Invalid parameter values", call. = FALSE)
 }
 
@@ -297,7 +314,9 @@ if (identical(mode, "single")) {
   out_pdf <- get_opt("output-pdf", required = TRUE)
   sample_label <- basename(input)
 
-  df <- parse_roh_txt(input, fill_cap)
+  df <- parse_roh_txt(input)
+  fill_cap <- resolve_fill_cap(list(df), fill_cap_raw, fill_cap_scale)
+  df <- apply_fill_cap(df, fill_cap)
   het_stats_all <- calc_het_stats(df)
   genome_bp <- nrow(df) * WINDOW_BP_FOR_FROH
   flags <- build_window_flags(df, roh_threshold)
@@ -342,13 +361,22 @@ if (identical(mode, "single")) {
   dir.create(dirname(summary_out), recursive = TRUE, showWarnings = FALSE)
   dir.create(dirname(combined_pdf), recursive = TRUE, showWarnings = FALSE)
 
+  parsed_rows <- list()
   summary_rows <- list()
   plot_rows <- list()
 
   for (i in seq_len(nrow(samples))) {
     sid <- samples$sample[[i]]
     path <- samples$file[[i]]
-    df <- parse_roh_txt(path, fill_cap)
+    df <- parse_roh_txt(path)
+    parsed_rows[[length(parsed_rows) + 1]] <- df
+  }
+
+  for (i in seq_len(nrow(samples))) {
+    sid <- samples$sample[[i]]
+    path <- samples$file[[i]]
+    fill_cap <- resolve_fill_cap(list(parsed_rows[[i]]), fill_cap_raw, fill_cap_scale)
+    df <- apply_fill_cap(parsed_rows[[i]], fill_cap)
     het_stats_all <- calc_het_stats(df)
 
     genome_bp <- nrow(df) * WINDOW_BP_FOR_FROH
@@ -371,6 +399,7 @@ if (identical(mode, "single")) {
     summary_rows[[length(summary_rows) + 1]] <- tibble(
       sample = sid,
       roh_file = path,
+      fill_cap_used = fill_cap,
       n_windows = nrow(df),
       mean_heterozygosity_all_windows = het_stats_all$mean_het,
       median_heterozygosity_all_windows = het_stats_all$median_het,
@@ -403,7 +432,7 @@ if (identical(mode, "single")) {
   if (length(plot_rows) == 0) stop("No samples had scaffolds passing min-length threshold", call. = FALSE)
 
   plot_df_all <- bind_rows(plot_rows)
-  plot_batch(plot_df_all, fill_cap, roh_threshold, fallback_resolution, combined_pdf, samples$sample)
+  plot_batch(plot_df_all, roh_threshold, fallback_resolution, combined_pdf, samples$sample)
 
   sample_counts <- plot_df_all %>% distinct(sample, chrom) %>% nrow()
   cat(sprintf("Wrote summary table: %s\n", summary_out))
@@ -413,6 +442,10 @@ if (identical(mode, "single")) {
   cat(sprintf("ROH threshold: %.6f\n", roh_threshold))
   cat(sprintf("Min scaffold length for plot: %.2f Mb\n", min_length_mb))
   cat(sprintf("Max scaffolds per sample: %d\n", max_scaffolds))
-  cat(sprintf("Fill cap: %.6f\n", fill_cap))
+  if (tolower(fill_cap_raw) == "auto") {
+    cat(sprintf("Fill cap mode: auto (sample-specific) with scale %.3f\n", fill_cap_scale))
+  } else {
+    cat(sprintf("Fill cap: %.6f\n", as_num(fill_cap_raw, "fill-cap")))
+  }
   cat(sprintf("Bin size: %.0f bp\n", bin_size_bp))
 }
