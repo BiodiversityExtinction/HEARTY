@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 
 import argparse
+import hashlib
 import os
+import random
 import shlex
 import shutil
 import subprocess
@@ -33,6 +35,9 @@ OPTIONAL ARGUMENTS:
     -m, --min-depth INT        Minimum depth for downstream summaries [default: 10]
     -M, --max-depth INT        Maximum depth for downstream summaries
     -t, --threshold FLOAT      Extra het calling threshold for window outputs (can be repeated; 0.05 always runs internally)
+    --downsample-depth INT     Downsample each site to this depth for downstream summaries
+    --downsample-reps INT      Number of downsampling replicates [default: 10]
+    --downsample-seed INT      Seed used to make per-site downsampling deterministic [default: 1]
     -c, --cores INT            Number of ANGSD/compression threads [default: 8]
     --angsd PATH               ANGSD executable [default: auto]
 REGION SPECIFICATION (choose one):
@@ -50,6 +55,7 @@ EXAMPLES:
     hearty -l bam_list.txt
     hearty -b sample.bam -o sample01 -t 0.10 -t 0.15
     hearty -b sample.bam -o sample01 -r "chr1:1-50000000"
+    hearty -b sample.bam -o sample01 --downsample-depth 10 --downsample-reps 10
 """
     print(help_text)
 
@@ -171,24 +177,30 @@ def coverage_tag(min_depth, max_depth):
     return tag
 
 
-def build_outputs(prefix, outdir, min_depth, max_depth, output_thresholds):
+def downsample_tag(downsample_depth, downsample_reps):
+    if downsample_depth is None:
+        return ""
+    return f".downsampled_depth{downsample_depth}_reps{downsample_reps}"
+
+
+def build_outputs(prefix, outdir, min_depth, max_depth, output_thresholds, downsample_depth, downsample_reps):
     output_dir = Path(outdir)
-    plots_dir = output_dir / "plots"
     cov_tag = coverage_tag(min_depth, max_depth)
+    ds_tag = downsample_tag(downsample_depth, downsample_reps)
     pos_gz = output_dir / f"{prefix}.pos.gz"
     counts_gz = output_dir / f"{prefix}.counts.gz"
 
     basecall = output_dir / f"{prefix}.basecall.txt.gz"
     windows = {
-        threshold: output_dir / f"{prefix}_het{threshold}.{cov_tag}.windows.txt.gz"
+        threshold: output_dir / f"{prefix}_het{threshold}.{cov_tag}{ds_tag}.windows.txt.gz"
         for threshold in output_thresholds
     }
     windows_trv = {
-        threshold: output_dir / f"{prefix}_het{threshold}.{cov_tag}.windows_trv.txt.gz"
+        threshold: output_dir / f"{prefix}_het{threshold}.{cov_tag}{ds_tag}.windows_trv.txt.gz"
         for threshold in output_thresholds
     }
     minorfreq = {
-        "table": output_dir / f"{prefix}.{coverage_tag(min_depth, max_depth)}.minorfreq.txt",
+        "table": output_dir / f"{prefix}.{coverage_tag(min_depth, max_depth)}{ds_tag}.minorfreq.txt",
     }
     return {
         "outdir": output_dir,
@@ -276,6 +288,10 @@ def threshold_status_col(threshold):
     return f"Status_{threshold_label(threshold)}"
 
 
+def count_col(base):
+    return f"count_{base}"
+
+
 def parse_existing_thresholds(header_names):
     thresholds = []
     for name in header_names:
@@ -329,6 +345,10 @@ def classify_counts_for_threshold(freqs, threshold):
 def parse_count_freqs(count_line):
     fields = count_line.strip().split()
     counts = [int(value) for value in fields[:4]]
+    return counts_to_freqs(counts)
+
+
+def counts_to_freqs(counts):
     positive_sum = sum(value for value in counts if value > 0)
     freqs = []
     for value in counts:
@@ -337,6 +357,45 @@ def parse_count_freqs(count_line):
         else:
             freqs.append(0.0)
     return freqs
+
+
+def sample_counts_without_replacement(counts, sample_depth, rng):
+    remaining = counts[:]
+    total = sum(remaining)
+    sampled = [0, 0, 0, 0]
+    for _ in range(sample_depth):
+        pick = rng.randrange(total)
+        running = 0
+        for idx, value in enumerate(remaining):
+            running += value
+            if pick < running:
+                sampled[idx] += 1
+                remaining[idx] -= 1
+                total -= 1
+                break
+    return sampled
+
+
+def site_rng(seed, chrom, site):
+    token = f"{seed}|{chrom}|{site}".encode()
+    digest = hashlib.blake2b(token, digest_size=8).digest()
+    return random.Random(int.from_bytes(digest, "big"))
+
+
+def downsample_mean_freqs(counts, chrom, site, depth, reps, seed):
+    rng = site_rng(seed, chrom, site)
+    summed = [0.0, 0.0, 0.0, 0.0]
+    for _ in range(reps):
+        sampled_counts = sample_counts_without_replacement(counts, depth, rng)
+        sampled_freqs = counts_to_freqs(sampled_counts)
+        for idx, value in enumerate(sampled_freqs):
+            summed[idx] += value
+    return [value / reps for value in summed]
+
+
+def basecall_has_count_columns(header_names):
+    required = {count_col("A"), count_col("C"), count_col("G"), count_col("T")}
+    return required.issubset(set(header_names))
 
 
 def basecall_table(pos_gz, counts_gz, output_path, thresholds, compression, dry_run=False):
@@ -359,13 +418,16 @@ def basecall_table(pos_gz, counts_gz, output_path, thresholds, compression, dry_
             raise RuntimeError(f"No positions found in {pos_gz}")
         next(counts_iter, None)
 
-        header_cols = ["A", "C", "G", "T"]
+        header_cols = [count_col("A"), count_col("C"), count_col("G"), count_col("T"), "A", "C", "G", "T"]
         for threshold in thresholds:
             header_cols.extend([threshold_base_col(threshold), threshold_status_col(threshold)])
         out_handle.write(first_pos.rstrip("\n") + "\t" + "\t".join(header_cols) + "\n")
         for pos_line, count_line in zip(pos_iter, counts_iter):
-            freqs = parse_count_freqs(count_line)
-            rendered = [f"{value:.2f}" if value > 0 else "0" for value in freqs]
+            count_fields = count_line.strip().split()
+            raw_counts = [int(value) for value in count_fields[:4]]
+            freqs = counts_to_freqs(raw_counts)
+            rendered = [str(value) for value in raw_counts]
+            rendered.extend(f"{value:.2f}" if value > 0 else "0" for value in freqs)
             for threshold in thresholds:
                 base, status = classify_counts_for_threshold(freqs, threshold)
                 rendered.extend([base, status])
@@ -382,6 +444,39 @@ def get_basecall_header_indices(basecall_gz, compression):
     return {name: idx for idx, name in enumerate(header)}
 
 
+def get_site_call(fields, header_index, threshold, downsample_depth=None, downsample_reps=10, downsample_seed=1):
+    if downsample_depth is None:
+        base = fields[header_index[threshold_base_col(threshold)]]
+        status = fields[header_index[threshold_status_col(threshold)]]
+        freqs = [
+            float(fields[header_index["A"]]),
+            float(fields[header_index["C"]]),
+            float(fields[header_index["G"]]),
+            float(fields[header_index["T"]]),
+        ]
+        return freqs, base, status
+
+    count_indices = [
+        header_index[count_col("A")],
+        header_index[count_col("C")],
+        header_index[count_col("G")],
+        header_index[count_col("T")],
+    ]
+    try:
+        counts = [int(fields[idx]) for idx in count_indices]
+        chrom = fields[0]
+        site = int(fields[1])
+    except (ValueError, IndexError):
+        return None
+
+    if sum(counts) < downsample_depth:
+        return None
+
+    freqs = downsample_mean_freqs(counts, chrom, site, downsample_depth, downsample_reps, downsample_seed)
+    base, status = classify_counts_for_threshold(freqs, threshold)
+    return freqs, base, status
+
+
 def depth_passes(fields, depth_idx, min_depth, max_depth):
     if depth_idx is None:
         return True
@@ -396,25 +491,33 @@ def depth_passes(fields, depth_idx, min_depth, max_depth):
     return True
 
 
-def minorfreq_from_basecall(basecall_gz, threshold, outputs, min_depth, max_depth, compression, dry_run=False):
+def minorfreq_from_basecall(
+    basecall_gz,
+    threshold,
+    outputs,
+    min_depth,
+    max_depth,
+    compression,
+    downsample_depth=None,
+    downsample_reps=10,
+    downsample_seed=1,
+    dry_run=False,
+):
     if dry_run:
+        downsample_msg = ""
+        if downsample_depth is not None:
+            downsample_msg = f",downsample_depth={downsample_depth},reps={downsample_reps}"
         print(
             f"Running: {quote_cmd(compression['decompress_cmd'])} {shlex.quote(str(basecall_gz))} "
             f"-> minorfreq tables for threshold {threshold} with depth filter min={min_depth}"
-            f"{'' if max_depth is None else f',max={max_depth}'}"
+            f"{'' if max_depth is None else f',max={max_depth}'}{downsample_msg}"
         )
         return
 
     header_index = get_basecall_header_indices(basecall_gz, compression)
     depth_idx = header_index.get("totDepth")
-    base_idx = header_index[threshold_base_col(threshold)]
-    status_idx = header_index[threshold_status_col(threshold)]
-    a_idx = header_index["A"]
-    c_idx = header_index["C"]
-    g_idx = header_index["G"]
-    t_idx = header_index["T"]
     pair_names = ("AC", "AG", "AT", "CG", "CT", "GT")
-    allele_idx = {"A": a_idx, "C": c_idx, "G": g_idx, "T": t_idx}
+    allele_idx = {"A": 0, "C": 1, "G": 2, "T": 3}
     counts = {}
     line_iter = iter_compressed_lines(basecall_gz, compression)
     next(line_iter)
@@ -422,18 +525,22 @@ def minorfreq_from_basecall(basecall_gz, threshold, outputs, min_depth, max_dept
         fields = line.rstrip("\n").split("\t")
         if not depth_passes(fields, depth_idx, min_depth, max_depth):
             continue
-        status = fields[status_idx]
+        site_call = get_site_call(
+            fields,
+            header_index,
+            threshold,
+            downsample_depth=downsample_depth,
+            downsample_reps=downsample_reps,
+            downsample_seed=downsample_seed,
+        )
+        if site_call is None:
+            continue
+        freqs, pair, status = site_call
         if not status.startswith("HET"):
             continue
-        pair = fields[base_idx]
         if pair not in pair_names or len(pair) != 2:
             continue
-        try:
-            pair_freqs = sorted(
-                [float(fields[allele_idx[pair[0]]]), float(fields[allele_idx[pair[1]]])]
-            )
-        except (ValueError, IndexError):
-            continue
+        pair_freqs = sorted([freqs[allele_idx[pair[0]]], freqs[allele_idx[pair[1]]]])
         minor = f"{pair_freqs[0]:.2f}" if pair_freqs[0] > 0 else "0"
         counts[(minor, pair)] = counts.get((minor, pair), 0) + 1
 
@@ -479,11 +586,24 @@ def parse_basecall_site(line):
     return parts[0], site
 
 
-def build_window_summary(basecall_gz, threshold, output_path, min_depth, max_depth, compression, transversions_only=False, dry_run=False):
+def build_window_summary(
+    basecall_gz,
+    threshold,
+    output_path,
+    min_depth,
+    max_depth,
+    compression,
+    transversions_only=False,
+    downsample_depth=None,
+    downsample_reps=10,
+    downsample_seed=1,
+    dry_run=False,
+):
     print(
         f"Running: {quote_cmd(compression['decompress_cmd'])} {shlex.quote(str(basecall_gz))} "
         f"-> 100kb windows for threshold {threshold} with depth filter min={min_depth}"
         f"{'' if max_depth is None else f',max={max_depth}'}"
+        f"{'' if downsample_depth is None else f',downsample_depth={downsample_depth},reps={downsample_reps}'}"
         f" -> {quote_cmd(compression['compress_cmd'])} > {shlex.quote(str(output_path))}"
     )
     if dry_run:
@@ -492,7 +612,6 @@ def build_window_summary(basecall_gz, threshold, output_path, min_depth, max_dep
     def _writer(out_handle):
         header_index = get_basecall_header_indices(basecall_gz, compression)
         depth_idx = header_index.get("totDepth")
-        status_idx = header_index[threshold_status_col(threshold)]
         site_count = 0
         het_count = 0
         current_window_start = 0
@@ -527,7 +646,17 @@ def build_window_summary(basecall_gz, threshold, output_path, min_depth, max_dep
             fields = line.rstrip("\n").split("\t")
             if not depth_passes(fields, depth_idx, min_depth, max_depth):
                 continue
-            status = fields[status_idx]
+            site_call = get_site_call(
+                fields,
+                header_index,
+                threshold,
+                downsample_depth=downsample_depth,
+                downsample_reps=downsample_reps,
+                downsample_seed=downsample_seed,
+            )
+            if site_call is None:
+                continue
+            _, _, status = site_call
 
             site_count = nonlocal_vars["site_count"]
             het_count = nonlocal_vars["het_count"]
@@ -588,7 +717,15 @@ def run_single_bam(bam_path, prefix, args):
 
     requested_thresholds = args.threshold if args.threshold else [0.05]
     output_thresholds = [threshold for threshold in requested_thresholds if threshold != DEFAULT_THRESHOLD]
-    outputs = build_outputs(prefix, args.outdir, args.min_depth, args.max_depth, output_thresholds)
+    outputs = build_outputs(
+        prefix,
+        args.outdir,
+        args.min_depth,
+        args.max_depth,
+        output_thresholds,
+        args.downsample_depth,
+        args.downsample_reps,
+    )
 
     downstream_outputs = [
         *outputs["windows"].values(),
@@ -644,13 +781,16 @@ def run_single_bam(bam_path, prefix, args):
     if args.reuse_existing and outputs["basecall"].exists() and not args.force:
         header_index = get_basecall_header_indices(outputs["basecall"], compression)
         existing_thresholds = parse_existing_thresholds(list(header_index.keys()))
+        needs_count_columns = not basecall_has_count_columns(list(header_index.keys()))
         missing_thresholds = [threshold for threshold in requested_thresholds if threshold not in existing_thresholds]
-        if missing_thresholds:
+        if missing_thresholds or needs_count_columns:
             active_thresholds = merge_thresholds(existing_thresholds, requested_thresholds)
-            print(
-                f"Extending existing basecall table with new thresholds: "
-                f"{','.join(map(str, missing_thresholds))}"
-            )
+            reasons = []
+            if missing_thresholds:
+                reasons.append(f"new thresholds {','.join(map(str, missing_thresholds))}")
+            if needs_count_columns:
+                reasons.append("raw count columns")
+            print(f"Rebuilding existing basecall table to add: {', '.join(reasons)}")
             if outputs["pos_gz"].exists() and outputs["counts_gz"].exists():
                 if not args.dry_run:
                     outputs["basecall"].unlink(missing_ok=True)
@@ -702,6 +842,9 @@ def run_single_bam(bam_path, prefix, args):
         args.min_depth,
         args.max_depth,
         compression,
+        downsample_depth=args.downsample_depth,
+        downsample_reps=args.downsample_reps,
+        downsample_seed=args.downsample_seed,
         dry_run=args.dry_run,
     )
 
@@ -714,6 +857,9 @@ def run_single_bam(bam_path, prefix, args):
             args.min_depth,
             args.max_depth,
             compression,
+            downsample_depth=args.downsample_depth,
+            downsample_reps=args.downsample_reps,
+            downsample_seed=args.downsample_seed,
             dry_run=args.dry_run,
         )
 
@@ -727,6 +873,9 @@ def run_single_bam(bam_path, prefix, args):
             args.max_depth,
             compression,
             transversions_only=True,
+            downsample_depth=args.downsample_depth,
+            downsample_reps=args.downsample_reps,
+            downsample_seed=args.downsample_seed,
             dry_run=args.dry_run,
         )
 
@@ -760,6 +909,9 @@ def main():
     optional.add_argument("-d", "--outdir", default="results", metavar="DIR", help="Output directory")
     optional.add_argument("-m", "--min-depth", type=int, default=10, metavar="INT", help="Minimum depth for downstream summaries")
     optional.add_argument("-M", "--max-depth", type=int, metavar="INT", help="Maximum depth for downstream summaries")
+    optional.add_argument("--downsample-depth", type=int, metavar="INT", help="Downsample each site to this depth for downstream summaries")
+    optional.add_argument("--downsample-reps", type=int, default=10, metavar="INT", help="Number of downsampling replicates")
+    optional.add_argument("--downsample-seed", type=int, default=1, metavar="INT", help="Seed used to make per-site downsampling deterministic")
     optional.add_argument("-c", "--cores", type=int, default=8, metavar="INT", help="ANGSD/compression threads")
     optional.add_argument("--angsd", default=DEFAULT_ANGSD, metavar="PATH", help="ANGSD executable")
 
@@ -792,6 +944,13 @@ def main():
     if args.bam and not args.out_prefix:
         print("Error: --out-prefix is required when using --bam", file=sys.stderr)
         sys.exit(1)
+    if args.downsample_depth is not None:
+        if args.downsample_depth <= 0:
+            print("Error: --downsample-depth must be a positive integer", file=sys.stderr)
+            sys.exit(1)
+        if args.downsample_reps <= 0:
+            print("Error: --downsample-reps must be a positive integer", file=sys.stderr)
+            sys.exit(1)
 
     thresholds = [DEFAULT_THRESHOLD]
     for threshold in args.threshold:

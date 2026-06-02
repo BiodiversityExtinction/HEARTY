@@ -7,6 +7,7 @@ The main idea is:
 - always inspect the exploratory `0.05` threshold
 - add stricter thresholds when needed
 - regenerate downstream summaries with different depth filters without rerunning ANGSD
+- optionally downsample sites to a fixed depth for cross-coverage comparisons
 
 ## Workflow Overview
 
@@ -18,9 +19,10 @@ The main idea is:
 ## Features
 
 - Heterozygosity calling with a fixed exploratory `0.05` threshold plus optional extra thresholds
-- One reusable basecall table per sample with threshold-specific call columns
+- One reusable basecall table per sample with raw counts, frequencies, and threshold-specific call columns
 - 100 kb window heterozygosity summaries for all sites and transversions only
 - Consolidated minor allele frequency summaries for threshold exploration
+- Optional replicate-averaged downsampling for minorfreq and heterozygosity summaries
 - Standalone plotting tools for minor allele frequency and ROH/window summaries
 - Standalone PSMC helper that uses HEARTY threshold-specific het calls for masking and runs PSMC
 - Batch processing for both BAM inputs and minorfreq/ROH plotting
@@ -85,6 +87,12 @@ Reuse an existing basecall file and only rebuild downstream summaries:
 python3 HEARTY.py -b sample.bam -o sample01 -d . --reuse-existing -m 20 -M 60 -t 0.25
 ```
 
+Depth-standardized summaries by downsampling each site to 10 reads, 10 times:
+
+```bash
+python3 HEARTY.py -b sample.bam -o sample01 -t 0.25 --downsample-depth 10 --downsample-reps 10
+```
+
 ### Usage
 
 ```text
@@ -100,6 +108,9 @@ Optional arguments:
   -m, --min-depth INT        Minimum depth for downstream summaries [default: 10]
   -M, --max-depth INT        Maximum depth for downstream summaries
   -t, --threshold FLOAT      Extra het calling threshold for window outputs (can be repeated; 0.05 always runs internally)
+  --downsample-depth INT     Downsample each site to this depth for downstream summaries
+  --downsample-reps INT      Number of downsampling replicates [default: 10]
+  --downsample-seed INT      Seed used to make per-site downsampling deterministic [default: 1]
   -c, --cores INT            Number of ANGSD/compression threads [default: 8]
   --angsd PATH               ANGSD executable [default: auto]
   -r, --regions STR          Region string for ANGSD -r
@@ -129,17 +140,28 @@ For each sample, HEARTY generates:
 - `{prefix}_het{threshold}.mincov{depth}[ _maxcov{depth} ].windows_trv.txt.gz` - 100 kb transversion-only window heterozygosity summary for explicitly requested `-t` thresholds
 - `{prefix}.mincov{depth}[ _maxcov{depth} ].minorfreq.txt` - consolidated minor allele frequency table after downstream depth filtering
 
+If downsampling is enabled, the downstream outputs are tagged, for example:
+- `{prefix}.mincov{depth}.downsampled_depth10_reps10.minorfreq.txt`
+- `{prefix}_het0.25.mincov{depth}.downsampled_depth10_reps10.windows.txt.gz`
+- `{prefix}_het0.25.mincov{depth}.downsampled_depth10_reps10.windows_trv.txt.gz`
+
 Important behavior:
 - `0.05` always runs internally for the exploratory minor allele frequency output, even if you only specify stricter thresholds
 - `--min-depth` and `--max-depth` are applied downstream from the raw basecall table, not during ANGSD counting
 - `--reuse-existing` lets you rebuild downstream summaries from an existing basecall file without rerunning ANGSD
 - if you rerun with `--reuse-existing` and request a new threshold, HEARTY will rebuild the basecall table from the existing `.pos.gz` and `.counts.gz` files and keep the old threshold columns
+- if `--downsample-depth` is used, only sites with total depth greater than or equal to that depth contribute to the downsampled summaries
 
 ### Basecall format
 
 The basecall table is gzip-compressed and tab-delimited. It contains:
 
 - position columns copied from `pos.gz` such as `chr`, `pos`, `totDepth`
+- raw count columns:
+  - `count_A`
+  - `count_C`
+  - `count_G`
+  - `count_T`
 - frequency columns: `A`, `C`, `G`, `T`
 - for each threshold:
   - `Base_<threshold>`
@@ -152,6 +174,24 @@ Base_0.05   Status_0.05   Base_0.25   Status_0.25
 ```
 
 This is the format expected by `PSMC_Tool.sh`.
+
+### Downsampling mode
+
+When `--downsample-depth` is provided, HEARTY keeps the basecall table unchanged but builds the downstream summaries from replicate-averaged downsampled counts.
+
+Per-site logic:
+- the site must first pass the normal `--min-depth` / `--max-depth` filters
+- the site must also have `totDepth >= --downsample-depth`
+- the observed nucleotide counts are downsampled without replacement to the requested depth
+- this is repeated `--downsample-reps` times
+- mean allele frequencies across replicates are calculated
+- thresholding is applied to those mean frequencies
+
+That means:
+- the `minorfreq` table is built from the mean downsampled `Base_0.05` / `Status_0.05` calls
+- the window heterozygosity summaries are built from the mean downsampled calls at each requested threshold
+
+This mode is intended for comparing samples across different coverages without letting deeper samples dominate simply because their allele proportions are estimated more precisely.
 
 ## Minor Frequency Plotting
 
