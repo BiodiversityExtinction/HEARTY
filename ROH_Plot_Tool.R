@@ -79,13 +79,26 @@ parse_roh_txt <- function(path) {
   df <- tibble(line = lines) %>%
     tidyr::extract(
       line,
-      into = c("chrom", "start", "end", "total_sites", "het_sites", "prop"),
-      regex = "^\\s*(\\S+)\\s+(\\d+)-(\\d+):\\s+(\\d+)\\s+sites,\\s+(\\d+)\\s+sites\\s+with\\s+'HET',\\s+Proportion:\\s+([0-9.]+)\\s*$",
+      into = c("chrom", "start", "end", "total_sites", "het_sites", "het_label", "prop"),
+      regex = "^\\s*(\\S+)\\s+(\\d+)-(\\d+):\\s+(\\d+)\\s+sites,\\s+(\\d+)\\s+sites\\s+with\\s+'(HET(?:_trv)?)',\\s+Proportion:\\s+([0-9.]+)\\s*$",
       convert = TRUE
     ) %>%
-    filter(!is.na(chrom), !is.na(start), !is.na(end), !is.na(prop))
+    filter(!is.na(chrom), !is.na(start), !is.na(end), !is.na(het_label), !is.na(prop))
   if (nrow(df) == 0) stop(sprintf("No parsable rows in %s", path), call. = FALSE)
   df
+}
+
+describe_dataset_type <- function(df, path) {
+  labels <- unique(stats::na.omit(df$het_label))
+  if (length(labels) == 1) {
+    if (identical(labels[[1]], "HET_trv")) return("transversion-only")
+    if (identical(labels[[1]], "HET")) return("all-sites")
+  }
+
+  lower_path <- tolower(path)
+  if (grepl("windows_trv", lower_path, fixed = TRUE)) return("transversion-only")
+  if (grepl("windows", lower_path, fixed = TRUE)) return("all-sites")
+  "unknown"
 }
 
 resolve_fill_cap <- function(df_list, fill_cap_raw, fill_cap_scale) {
@@ -315,6 +328,7 @@ if (identical(mode, "single")) {
   sample_label <- basename(input)
 
   df <- parse_roh_txt(input)
+  dataset_type <- describe_dataset_type(df, input)
   fill_cap <- resolve_fill_cap(list(df), fill_cap_raw, fill_cap_scale)
   df <- apply_fill_cap(df, fill_cap)
   het_stats_all <- calc_het_stats(df)
@@ -328,9 +342,12 @@ if (identical(mode, "single")) {
   built <- build_single_plot_df(df, min_length_mb, max_scaffolds, bin_size_bp, roh_threshold)
   plotted_df <- df %>% filter(chrom %in% unique(as.character(built$plot_df$chrom)))
   het_stats_plotted <- calc_het_stats(plotted_df)
-  plot_single(built$plot_df, sample_label, fill_cap, roh_threshold, fallback_resolution, out_pdf)
+  dir.create(dirname(out_pdf), recursive = TRUE, showWarnings = FALSE)
+  plot_single(built$plot_df, sprintf("%s [%s]", sample_label, dataset_type), fill_cap, roh_threshold, fallback_resolution, out_pdf)
 
   cat(sprintf("Wrote PDF: %s\n", out_pdf))
+  cat(sprintf("Dataset type: %s\n", dataset_type))
+  cat(sprintf("HET label parsed: %s\n", paste(unique(df$het_label), collapse = ", ")))
   cat(sprintf("Input rows parsed: %d\n", nrow(df)))
   cat(sprintf("Mean heterozygosity (all parsed windows): %.7f\n", het_stats_all$mean_het))
   cat(sprintf("Median heterozygosity (all parsed windows): %.7f\n", het_stats_all$median_het))
@@ -377,6 +394,7 @@ if (identical(mode, "single")) {
     path <- samples$file[[i]]
     fill_cap <- resolve_fill_cap(list(parsed_rows[[i]]), fill_cap_raw, fill_cap_scale)
     df <- apply_fill_cap(parsed_rows[[i]], fill_cap)
+    dataset_type <- describe_dataset_type(df, path)
     het_stats_all <- calc_het_stats(df)
 
     genome_bp <- nrow(df) * WINDOW_BP_FOR_FROH
@@ -399,6 +417,8 @@ if (identical(mode, "single")) {
     summary_rows[[length(summary_rows) + 1]] <- tibble(
       sample = sid,
       roh_file = path,
+      dataset_type = dataset_type,
+      het_label = paste(unique(df$het_label), collapse = ","),
       fill_cap_used = fill_cap,
       n_windows = nrow(df),
       mean_heterozygosity_all_windows = het_stats_all$mean_het,
