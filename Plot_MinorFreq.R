@@ -11,7 +11,7 @@ show_help <- function() {
       "  Rscript Plot_MinorFreq.R --minorfreq-file <file> --out <output_prefix> [--format pdf|svg|png] [--log-y] [--y-cap-after-x FLOAT]",
       "",
       "Batch usage:",
-      "  Rscript Plot_MinorFreq.R --sample-list <list.txt> [--format pdf|svg|png] [--log-y] [--y-cap-after-x FLOAT]",
+      "  Rscript Plot_MinorFreq.R --sample-list <list.txt> [--batch-out <combined_output>] [--format pdf|svg|png] [--log-y] [--y-cap-after-x FLOAT]",
       "",
       "Single-sample arguments:",
       "  --minorfreq-file   Path to HEARTY consolidated .minorfreq.txt file",
@@ -19,6 +19,7 @@ show_help <- function() {
       "",
       "Batch arguments:",
       "  --sample-list      Text file with: column 1 = minorfreq file, column 2 = output prefix",
+      "  --batch-out        Optional combined batch plot path",
       "",
       "Optional flags:",
       "  --format           Output format: pdf, svg, or png [default: pdf]",
@@ -28,13 +29,14 @@ show_help <- function() {
       "Outputs:",
       "  <output_prefix>_minorfreq_overlay.<format>",
       "  <output_prefix>_minorfreq_summary.txt",
+      "  <batch_output>     Combined faceted batch plot when --sample-list is used",
       sep = "\n"
     ),
     "\n"
   )
 }
 
-print_run_summary <- function(output_prefixes, fmt, log_y, y_cap_after_x) {
+print_run_summary <- function(output_prefixes, fmt, log_y, y_cap_after_x, batch_output = NULL) {
   cat("Plot_MinorFreq.R completed\n")
   cat(sprintf("Output format: %s\n", fmt))
   cat(sprintf("Y axis mode: %s\n", if (log_y) "log10" else "linear"))
@@ -44,8 +46,10 @@ print_run_summary <- function(output_prefixes, fmt, log_y, y_cap_after_x) {
     cat("Y cap rule: none\n")
   }
   cat("Generated files:\n")
+  if (!is.null(batch_output)) {
+    cat(sprintf("  %s\n", batch_output))
+  }
   for (prefix in output_prefixes) {
-    cat(sprintf("  %s_minorfreq_overlay.%s\n", prefix, fmt))
     cat(sprintf("  %s_minorfreq_summary.txt\n", prefix))
   }
 }
@@ -97,6 +101,10 @@ open_device <- function(path, fmt) {
   }
 }
 
+strip_extension <- function(path) {
+  sub("\\.[^.]+$", "", path)
+}
+
 pair_cols <- c("AC", "AG", "AT", "CG", "CT", "GT")
 pair_types <- c(AC = "Transversion", AG = "Transition", AT = "Transversion", CG = "Transversion", CT = "Transition", GT = "Transversion")
 
@@ -139,6 +147,32 @@ write_summary <- function(d, output_prefix) {
     sep = "\t",
     row.names = FALSE
   )
+}
+
+plot_overlay_gg <- function(d, sample_label, output_path, fmt, log_y, y_max, pairs, cols) {
+  dir.create(dirname(output_path), recursive = TRUE, showWarnings = FALSE)
+
+  d$pair <- factor(d$pair, levels = pairs, ordered = TRUE)
+  p <- ggplot2::ggplot(d, ggplot2::aes(x = freq, y = count, color = pair)) +
+    ggplot2::geom_line(linewidth = 0.8) +
+    ggplot2::geom_point(size = 1.5) +
+    ggplot2::scale_color_manual(values = cols[pairs], drop = FALSE) +
+    ggplot2::labs(
+      title = sample_label,
+      x = "Minor Allele Frequency",
+      y = if (log_y) "Site Count (log10)" else "Site Count",
+      color = "State"
+    ) +
+    ggplot2::theme_bw(base_size = 12) +
+    ggplot2::theme(plot.title = ggplot2::element_text(face = "bold", hjust = 0.5))
+
+  if (log_y) {
+    p <- p + ggplot2::scale_y_log10(limits = c(1, y_max))
+  } else {
+    p <- p + ggplot2::coord_cartesian(ylim = c(0, y_max))
+  }
+
+  ggplot2::ggsave(output_path, p, width = 11, height = 8, units = "in", device = fmt)
 }
 
 build_panel_data <- function(d, pairs) {
@@ -210,6 +244,44 @@ plot_overlay <- function(d, output_prefix, fmt, log_y, y_max, pairs, cols) {
   par(oldpar)
 }
 
+plot_batch_combined <- function(d, output_path, fmt, log_y, y_max, pairs, cols) {
+  dir.create(dirname(output_path), recursive = TRUE, showWarnings = FALSE)
+
+  d$pair <- factor(d$pair, levels = pairs, ordered = TRUE)
+  d$sample <- factor(d$sample, levels = unique(d$sample), ordered = TRUE)
+
+  p <- ggplot2::ggplot(d, ggplot2::aes(x = freq, y = count, color = pair)) +
+    ggplot2::geom_line(linewidth = 0.7) +
+    ggplot2::geom_point(size = 1.2) +
+    ggplot2::facet_wrap(~sample, scales = "fixed") +
+    ggplot2::scale_color_manual(values = cols[pairs], drop = FALSE) +
+    ggplot2::labs(
+      title = "Minor Allele Frequency Overlay",
+      x = "Minor Allele Frequency",
+      y = if (log_y) "Site Count (log10)" else "Site Count",
+      color = "State"
+    ) +
+    ggplot2::theme_bw(base_size = 12) +
+    ggplot2::theme(
+      plot.title = ggplot2::element_text(face = "bold", hjust = 0.5),
+      strip.text = ggplot2::element_text(face = "bold")
+    )
+
+  if (log_y) {
+    p <- p + ggplot2::scale_y_log10(limits = c(1, y_max))
+  } else {
+    p <- p + ggplot2::coord_cartesian(ylim = c(0, y_max))
+  }
+
+  n_samples <- length(unique(d$sample))
+  ncol <- if (n_samples <= 4) 2 else 3
+  nrow <- ceiling(n_samples / ncol)
+  height <- max(8, 3.2 * nrow)
+  width <- if (ncol == 2) 12 else 15
+
+  ggplot2::ggsave(output_path, p, width = width, height = height, units = "in", device = fmt)
+}
+
 read_sample_list <- function(path) {
   lines <- readLines(path, warn = FALSE)
   rows <- list()
@@ -272,13 +344,28 @@ if (!is.null(opt[["sample-list"]])) {
     shared_y_max <- 1
   }
 
+  batch_rows <- vector("list", nrow(sample_df))
   for (i in seq_len(nrow(sample_df))) {
     d <- datasets[[i]]
     output_prefix <- sample_df$output_prefix[[i]]
+    sample_label <- basename(output_prefix)
     write_summary(d, output_prefix)
-    plot_overlay(d, output_prefix, fmt, log_y, shared_y_max, pairs, cols)
+    batch_rows[[i]] <- data.frame(
+      freq = d$freq,
+      pair = d$pair,
+      count = d$count,
+      type = d$type,
+      sample = sample_label,
+      stringsAsFactors = FALSE
+    )
   }
-  print_run_summary(sample_df$output_prefix, fmt, log_y, y_cap_after_x)
+  batch_output <- if (!is.null(opt[["batch-out"]])) {
+    opt[["batch-out"]]
+  } else {
+    paste0(strip_extension(sample_df$minorfreq_file[[1]]), "_batch_overlay.", fmt)
+  }
+  plot_batch_combined(do.call(rbind, batch_rows), batch_output, fmt, log_y, shared_y_max, pairs, cols)
+  print_run_summary(sample_df$output_prefix, fmt, log_y, y_cap_after_x, batch_output = batch_output)
 } else {
   if (is.null(opt[["minorfreq-file"]]) || is.null(opt[["out"]])) {
     show_help()
@@ -289,6 +376,6 @@ if (!is.null(opt[["sample-list"]])) {
   built <- build_panel_data(d, pairs)
   y_max <- calc_y_max(built$panel_data, y_cap_after_x)
   write_summary(d, opt[["out"]])
-  plot_overlay(d, opt[["out"]], fmt, log_y, y_max, pairs, cols)
+  plot_overlay_gg(d, basename(opt[["out"]]), paste0(opt[["out"]], "_minorfreq_overlay.", fmt), fmt, log_y, y_max, pairs, cols)
   print_run_summary(opt[["out"]], fmt, log_y, y_cap_after_x)
 }
