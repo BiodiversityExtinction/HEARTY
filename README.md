@@ -113,6 +113,7 @@ Optional arguments:
   --downsample-seed INT      Seed used to make per-site downsampling deterministic [default: 1]
   -c, --cores INT            Number of ANGSD/compression threads [default: 8]
   --angsd PATH               ANGSD executable [default: auto]
+  --angsd-params STR         Extra ANGSD parameters, quoted as one string
   -r, --regions STR          Region string for ANGSD -r
   -f, --rf FILE              Regions file for ANGSD -rf
   -n, --dry-run              Show commands without executing them
@@ -151,6 +152,23 @@ Important behavior:
 - `--reuse-existing` lets you rebuild downstream summaries from an existing basecall file without rerunning ANGSD
 - if you rerun with `--reuse-existing` and request a new threshold, HEARTY will rebuild the basecall table from the existing `.pos.gz` and `.counts.gz` files and keep the old threshold columns
 - if `--downsample-depth` is used, only sites with total depth greater than or equal to that depth contribute to the downsampled summaries
+
+### Custom ANGSD parameters
+
+HEARTY uses a fixed default ANGSD command for generating nucleotide counts, but you can add extra ANGSD options with `--angsd-params`.
+
+Example:
+
+```bash
+python3 HEARTY.py \
+  -b sample.bam \
+  -o sample01 \
+  --angsd-params "-minmapq 30 -baq 1"
+```
+
+The value must be quoted as one string. HEARTY appends these options to the ANGSD command after its defaults, so the final command is visible with `--dry-run`.
+
+This option is intended for ANGSD filtering and model settings such as mapping-quality, base-alignment-quality, or BAQ-related choices. HEARTY still manages the required counting/output options, including `-i`, `-out`, `-docounts`, `-dumpCounts`, and `-nThreads`.
 
 ### Basecall format
 

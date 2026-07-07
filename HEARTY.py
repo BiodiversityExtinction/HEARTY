@@ -40,6 +40,7 @@ OPTIONAL ARGUMENTS:
     --downsample-seed INT      Seed used to make per-site downsampling deterministic [default: 1]
     -c, --cores INT            Number of ANGSD/compression threads [default: 8]
     --angsd PATH               ANGSD executable [default: auto]
+    --angsd-params STR         Extra ANGSD parameters, quoted as one string
 REGION SPECIFICATION (choose one):
     -r, --regions STR          Region string for ANGSD -r
     -f, --rf FILE              Regions file for ANGSD -rf
@@ -47,7 +48,7 @@ REGION SPECIFICATION (choose one):
 RUN OPTIONS:
     -n, --dry-run              Show commands without executing them
     -F, --force                Overwrite existing outputs
-    --reuse-existing          Reuse existing ANGSD/basecall outputs when available
+    --reuse-existing           Reuse existing ANGSD/basecall outputs when available
     -h, --help                 Show this help message
 
 EXAMPLES:
@@ -56,6 +57,7 @@ EXAMPLES:
     hearty -b sample.bam -o sample01 -t 0.10 -t 0.15
     hearty -b sample.bam -o sample01 -r "chr1:1-50000000"
     hearty -b sample.bam -o sample01 --downsample-depth 10 --downsample-reps 10
+    hearty -b sample.bam -o sample01 --angsd-params "-minmapq 30 -baq 1"
 """
     print(help_text)
 
@@ -154,6 +156,34 @@ def coerce_rf_reg(rf, reg):
         reg = rf
         rf = ""
     return rf, reg
+
+
+def parse_angsd_params(raw_params):
+    if not raw_params:
+        return []
+    try:
+        return shlex.split(raw_params)
+    except ValueError as exc:
+        print(f"Error: Could not parse --angsd-params: {exc}", file=sys.stderr)
+        sys.exit(1)
+
+
+def normalize_angsd_params_arg(argv):
+    normalized = []
+    i = 0
+    while i < len(argv):
+        arg = argv[i]
+        if arg == "--angsd-params":
+            if i + 1 >= len(argv):
+                normalized.append(arg)
+                i += 1
+                continue
+            normalized.append(f"--angsd-params={argv[i + 1]}")
+            i += 2
+            continue
+        normalized.append(arg)
+        i += 1
+    return normalized
 
 
 def maybe_remove(path, force):
@@ -714,6 +744,7 @@ def run_single_bam(bam_path, prefix, args):
     angsd = ensure_tool("ANGSD", args.angsd)
     compression = compression_tools(args.cores)
     rf, reg = coerce_rf_reg(args.rf, args.regions)
+    extra_angsd_params = parse_angsd_params(args.angsd_params)
 
     requested_thresholds = args.threshold if args.threshold else [0.05]
     output_thresholds = [threshold for threshold in requested_thresholds if threshold != DEFAULT_THRESHOLD]
@@ -769,6 +800,8 @@ def run_single_bam(bam_path, prefix, args):
         angsd_cmd.extend(["-rf", rf])
     elif reg:
         angsd_cmd.extend(["-r", reg])
+    if extra_angsd_params:
+        angsd_cmd.extend(extra_angsd_params)
 
     log_path = outputs["outdir"] / f"{prefix}.angsd.log"
     print(f"ANGSD log: {log_path}")
@@ -914,6 +947,12 @@ def main():
     optional.add_argument("--downsample-seed", type=int, default=1, metavar="INT", help="Seed used to make per-site downsampling deterministic")
     optional.add_argument("-c", "--cores", type=int, default=8, metavar="INT", help="ANGSD/compression threads")
     optional.add_argument("--angsd", default=DEFAULT_ANGSD, metavar="PATH", help="ANGSD executable")
+    optional.add_argument(
+        "--angsd-params",
+        default="",
+        metavar="STR",
+        help='Extra ANGSD parameters, quoted as one string, e.g. "-minmapq 30 -baq 1"',
+    )
 
     optional.add_argument(
         "-t",
@@ -936,7 +975,7 @@ def main():
     run_group.add_argument("--reuse-existing", action="store_true", help="Reuse existing ANGSD/basecall outputs when available")
     run_group.add_argument("-h", "--help", action="store_true", help="Show this help message")
 
-    args = parser.parse_args()
+    args = parser.parse_args(normalize_angsd_params_arg(sys.argv[1:]))
     if args.help:
         show_help()
         sys.exit(0)
