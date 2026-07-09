@@ -23,6 +23,7 @@ usage <- paste(
   "  --bin-size-bp 500000",
   "  --fallback-resolution 100",
   "  --roh-threshold 0.0001",
+  "  --roh-threshold-mode absolute",
   "",
   "Single-mode required:",
   "  --input <path/to/sample.windows.txt.gz>",
@@ -177,6 +178,40 @@ build_window_flags <- function(df, roh_threshold) {
     ungroup()
 }
 
+resolve_roh_threshold <- function(df, threshold_value, threshold_mode) {
+  if (threshold_mode == "absolute") {
+    return(threshold_value)
+  }
+  basis <- if (threshold_mode == "mean") {
+    mean(df$prop, na.rm = TRUE)
+  } else {
+    median(df$prop, na.rm = TRUE)
+  }
+  if (!is.finite(basis)) {
+    stop(sprintf("Could not calculate %s heterozygosity for relative ROH threshold", threshold_mode), call. = FALSE)
+  }
+  threshold_value * basis
+}
+
+format_roh_caption <- function(threshold_input, threshold_mode, threshold_used = NULL) {
+  if (threshold_mode == "absolute") {
+    return(sprintf("Black ticks: raw bins <= %.6f | Orange ticks: bridged ROH (single-bin gap filled if ROH on both sides)", threshold_input))
+  }
+  if (!is.null(threshold_used)) {
+    return(sprintf(
+      "Black ticks: raw bins <= %.6f (%s x %s window heterozygosity) | Orange ticks: bridged ROH (single-bin gap filled if ROH on both sides)",
+      threshold_used,
+      threshold_input,
+      threshold_mode
+    ))
+  }
+  sprintf(
+    "Black ticks: raw bins <= sample-specific threshold (%s x %s window heterozygosity) | Orange ticks: bridged ROH (single-bin gap filled if ROH on both sides)",
+    threshold_input,
+    threshold_mode
+  )
+}
+
 build_single_plot_df <- function(df, min_length_mb, max_scaffolds, bin_size_bp, roh_threshold) {
   sizes_all <- df %>% group_by(chrom) %>% summarise(size_bp = max(end, na.rm = TRUE), .groups = "drop")
   sizes_sel <- sizes_all %>% filter(size_bp >= min_length_mb * 1e6) %>% arrange(desc(size_bp)) %>% slice_head(n = max_scaffolds)
@@ -214,7 +249,7 @@ build_single_plot_df <- function(df, min_length_mb, max_scaffolds, bin_size_bp, 
   list(plot_df = pdat, scaffolds_plotted = nrow(sizes_sel), rows_used = nrow(d), bin_size = bin_size)
 }
 
-plot_single <- function(plot_df, sample_label, fill_cap, roh_threshold, fallback_resolution, out_pdf) {
+plot_single <- function(plot_df, sample_label, fill_cap, caption_text, fallback_resolution, out_pdf) {
   n_panels <- n_distinct(plot_df$chrom)
   p <- ggplot(plot_df) +
     geom_rect(aes(xmin = start_Mb, xmax = end_Mb, ymin = 0, ymax = 0.82, fill = prop_cap)) +
@@ -223,7 +258,7 @@ plot_single <- function(plot_df, sample_label, fill_cap, roh_threshold, fallback
     facet_grid(rows = vars(chrom), switch = "y") +
     scale_fill_gradient(name = "HET proportion", limits = c(0, fill_cap), low = "red", high = "blue", na.value = "grey90") +
     labs(x = "Position (Mb)", y = NULL, title = sample_label,
-         caption = sprintf("Black ticks: raw bins <= %.6f | Orange ticks: bridged ROH (single-bin gap filled if ROH on both sides)", roh_threshold)) +
+         caption = caption_text) +
     coord_cartesian(ylim = c(0, 1.10), expand = FALSE) +
     theme_minimal(base_size = 11) +
     theme(axis.title.x = element_text(size = 14), axis.text.x = element_text(size = 12), axis.text.y = element_blank(),
@@ -279,7 +314,7 @@ build_batch_plot_df <- function(df, sample_id, min_length_mb, max_scaffolds, bin
   list(plot_df = pdat, n_chrom = nrow(sizes_sel), rows_used = nrow(d), bin_size = bin_size)
 }
 
-plot_batch <- function(plot_df_all, roh_threshold, fallback_resolution, out_pdf, sample_order) {
+plot_batch <- function(plot_df_all, caption_text, fallback_resolution, out_pdf, sample_order) {
   plot_df_all$sample <- factor(plot_df_all$sample, levels = sample_order, ordered = TRUE)
   sample_counts <- plot_df_all %>% distinct(sample, chrom) %>% count(sample, name = "n_panels") %>%
     mutate(sample_order = as.integer(sample), row_id = ((sample_order - 1) %/% 2) + 1)
@@ -290,8 +325,7 @@ plot_batch <- function(plot_df_all, roh_threshold, fallback_resolution, out_pdf,
     geom_segment(data = dplyr::filter(plot_df_all, roh_hit_bridged), aes(x = start_Mb, xend = end_Mb, y = y_bridged_tick, yend = y_bridged_tick), inherit.aes = FALSE, linewidth = 1.8, color = "#E69F00") +
     facet_wrap(~sample, ncol = 2, scales = "free") +
     scale_fill_gradient(name = "HET proportion", low = "red", high = "blue", na.value = "grey90") +
-    labs(x = "Position (Mb)", y = NULL,
-         caption = sprintf("Black ticks: raw bins <= %.6f | Orange ticks: bridged ROH (single-bin gap filled if ROH on both sides)", roh_threshold)) +
+    labs(x = "Position (Mb)", y = NULL, caption = caption_text) +
     coord_cartesian(expand = FALSE) +
     theme_minimal(base_size = 11) +
     theme(axis.title.x = element_text(size = 14), axis.text.x = element_text(size = 11), axis.text.y = element_blank(), axis.ticks.y = element_blank(),
@@ -315,9 +349,13 @@ fill_cap_scale <- as_num(get_opt("fill-cap-scale", "1.0"), "fill-cap-scale")
 bin_size_bp <- as_num(get_opt("bin-size-bp", "500000"), "bin-size-bp")
 fallback_resolution <- as_int(get_opt("fallback-resolution", "100"), "fallback-resolution")
 roh_threshold <- as_num(get_opt("roh-threshold", "0.0001"), "roh-threshold")
+roh_threshold_mode <- tolower(get_opt("roh-threshold-mode", "absolute"))
 
 if (min_length_mb <= 0 || max_scaffolds <= 0 || fill_cap_scale <= 0 || bin_size_bp <= 0 || fallback_resolution <= 0 || roh_threshold < 0) {
   stop("Invalid parameter values", call. = FALSE)
+}
+if (!roh_threshold_mode %in% c("absolute", "mean", "median")) {
+  stop("--roh-threshold-mode must be one of: absolute, mean, median", call. = FALSE)
 }
 
 WINDOW_BP_FOR_FROH <- 100000
@@ -332,18 +370,20 @@ if (identical(mode, "single")) {
   fill_cap <- resolve_fill_cap(list(df), fill_cap_raw, fill_cap_scale)
   df <- apply_fill_cap(df, fill_cap)
   het_stats_all <- calc_het_stats(df)
+  roh_threshold_used <- resolve_roh_threshold(df, roh_threshold, roh_threshold_mode)
+  roh_caption <- format_roh_caption(roh_threshold, roh_threshold_mode, roh_threshold_used)
   genome_bp <- nrow(df) * WINDOW_BP_FOR_FROH
-  flags <- build_window_flags(df, roh_threshold)
+  flags <- build_window_flags(df, roh_threshold_used)
   seg_raw <- calc_roh_segments(flags, "roh_raw")
   seg_br <- calc_roh_segments(flags, "roh_bridged")
   froh_raw <- calc_froh_bins(seg_raw, genome_bp)
   froh_br <- calc_froh_bins(seg_br, genome_bp)
 
-  built <- build_single_plot_df(df, min_length_mb, max_scaffolds, bin_size_bp, roh_threshold)
+  built <- build_single_plot_df(df, min_length_mb, max_scaffolds, bin_size_bp, roh_threshold_used)
   plotted_df <- df %>% filter(chrom %in% unique(as.character(built$plot_df$chrom)))
   het_stats_plotted <- calc_het_stats(plotted_df)
   dir.create(dirname(out_pdf), recursive = TRUE, showWarnings = FALSE)
-  plot_single(built$plot_df, sprintf("%s [%s]", sample_label, dataset_type), fill_cap, roh_threshold, fallback_resolution, out_pdf)
+  plot_single(built$plot_df, sprintf("%s [%s]", sample_label, dataset_type), fill_cap, roh_caption, fallback_resolution, out_pdf)
 
   cat(sprintf("Wrote PDF: %s\n", out_pdf))
   cat(sprintf("Dataset type: %s\n", dataset_type))
@@ -357,7 +397,9 @@ if (identical(mode, "single")) {
   cat(sprintf("Scaffolds plotted: %d (min length %.2f Mb; max panels %d)\n", built$scaffolds_plotted, min_length_mb, max_scaffolds))
   cat(sprintf("Bin size used: %.0f bp\n", built$bin_size))
   cat(sprintf("PDF fallback resolution: %d dpi\n", fallback_resolution))
-  cat(sprintf("ROH tick threshold: %.6f\n", roh_threshold))
+  cat(sprintf("ROH threshold mode: %s\n", roh_threshold_mode))
+  cat(sprintf("ROH threshold input: %.6f\n", roh_threshold))
+  cat(sprintf("ROH threshold used: %.6f\n", roh_threshold_used))
   cat(sprintf("Raw ROH bins flagged: %d\n", sum(built$plot_df$roh_hit_raw, na.rm = TRUE)))
   cat(sprintf("Bridged ROH bins flagged: %d\n", sum(built$plot_df$roh_hit_bridged, na.rm = TRUE)))
   cat(sprintf("Genome size used for FROH: %.0f bp (n_windows=%d x %d bp)\n", genome_bp, nrow(df), WINDOW_BP_FOR_FROH))
@@ -396,9 +438,10 @@ if (identical(mode, "single")) {
     df <- apply_fill_cap(parsed_rows[[i]], fill_cap)
     dataset_type <- describe_dataset_type(df, path)
     het_stats_all <- calc_het_stats(df)
+    roh_threshold_used <- resolve_roh_threshold(df, roh_threshold, roh_threshold_mode)
 
     genome_bp <- nrow(df) * WINDOW_BP_FOR_FROH
-    flags <- build_window_flags(df, roh_threshold)
+    flags <- build_window_flags(df, roh_threshold_used)
     seg_raw <- calc_roh_segments(flags, "roh_raw")
     seg_br <- calc_roh_segments(flags, "roh_bridged")
     froh_raw <- calc_froh_bins(seg_raw, genome_bp)
@@ -409,7 +452,7 @@ if (identical(mode, "single")) {
     br_map <- setNames(froh_br$froh, froh_br$metric)
     br_bp_map <- setNames(froh_br$roh_bp, froh_br$metric)
 
-    built <- build_batch_plot_df(df, sid, min_length_mb, max_scaffolds, bin_size_bp, roh_threshold)
+    built <- build_batch_plot_df(df, sid, min_length_mb, max_scaffolds, bin_size_bp, roh_threshold_used)
     plotted_df <- df %>% filter(chrom %in% unique(built$plot_df$chrom))
     het_stats_plotted <- if (nrow(plotted_df) > 0) calc_het_stats(plotted_df) else tibble(mean_het = NA_real_, median_het = NA_real_)
     if (nrow(built$plot_df) > 0) plot_rows[[length(plot_rows) + 1]] <- built$plot_df
@@ -424,7 +467,9 @@ if (identical(mode, "single")) {
       mean_heterozygosity_all_windows = het_stats_all$mean_het,
       median_heterozygosity_all_windows = het_stats_all$median_het,
       genome_bp_for_froh = genome_bp,
-      roh_threshold = roh_threshold,
+      roh_threshold_mode = roh_threshold_mode,
+      roh_threshold_input = roh_threshold,
+      roh_threshold = roh_threshold_used,
       n_raw_segments = nrow(seg_raw),
       n_bridged_segments = nrow(seg_br),
       raw_froh_gt100kb = raw_map[["gt100kb"]],
@@ -452,14 +497,19 @@ if (identical(mode, "single")) {
   if (length(plot_rows) == 0) stop("No samples had scaffolds passing min-length threshold", call. = FALSE)
 
   plot_df_all <- bind_rows(plot_rows)
-  plot_batch(plot_df_all, roh_threshold, fallback_resolution, combined_pdf, samples$sample)
+  roh_caption <- format_roh_caption(roh_threshold, roh_threshold_mode)
+  plot_batch(plot_df_all, roh_caption, fallback_resolution, combined_pdf, samples$sample)
 
   sample_counts <- plot_df_all %>% distinct(sample, chrom) %>% nrow()
   cat(sprintf("Wrote summary table: %s\n", summary_out))
   cat(sprintf("Wrote combined PDF: %s\n", combined_pdf))
   cat(sprintf("Samples processed: %d\n", nrow(summary_df)))
   cat(sprintf("Total plotted scaffold panels: %d\n", sample_counts))
-  cat(sprintf("ROH threshold: %.6f\n", roh_threshold))
+  cat(sprintf("ROH threshold mode: %s\n", roh_threshold_mode))
+  cat(sprintf("ROH threshold input: %.6f\n", roh_threshold))
+  if (roh_threshold_mode != "absolute") {
+    cat("ROH threshold used: sample-specific values written to the summary table\n")
+  }
   cat(sprintf("Min scaffold length for plot: %.2f Mb\n", min_length_mb))
   cat(sprintf("Max scaffolds per sample: %d\n", max_scaffolds))
   if (tolower(fill_cap_raw) == "auto") {
