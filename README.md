@@ -13,7 +13,7 @@ The main idea is:
 
 1. Run `HEARTY.py` to generate ANGSD counts, a reusable basecall table, the exploratory minor allele frequency table, and threshold-specific 100 kb window summaries.
 2. Use `Plot_MinorFreq.R` to inspect the exploratory `0.05` minor allele frequency spectrum and choose a stricter heterozygosity threshold.
-3. Use `ROH_Plot_Tool.R` to visualize the threshold-specific window summaries and inspect ROH-like patterns.
+3. Use `ROH_Window_Summary.R` to define window-based ROH-like regions, calculate FROH summaries, and visualize the threshold-specific window summaries.
 4. Use `PSMC_Tool.sh` to prepare masked PSMC input from HEARTY outputs and run PSMC, including optional bootstrap replicates.
 
 ## Features
@@ -23,9 +23,9 @@ The main idea is:
 - 100 kb window heterozygosity summaries for all sites and transversions only
 - Consolidated minor allele frequency summaries for threshold exploration
 - Optional replicate-averaged downsampling for minorfreq and heterozygosity summaries
-- Standalone plotting tools for minor allele frequency and ROH/window summaries
+- Standalone plotting and summary tools for minor allele frequency and ROH/window summaries
 - Standalone PSMC helper that uses HEARTY threshold-specific het calls for masking and runs PSMC
-- Batch processing for both BAM inputs and minorfreq/ROH plotting
+- Batch processing for both BAM inputs and minorfreq/ROH window summaries
 
 ## Installation
 
@@ -46,7 +46,7 @@ Core workflow:
 
 Plotting:
 - R
-- Packages used by `ROH_Plot_Tool.R`: `tidyverse`, `ggplot2`
+- Packages used by `ROH_Window_Summary.R`: `tidyverse`, `ggplot2`
 
 PSMC helper:
 - `bcftools`
@@ -261,9 +261,9 @@ The plotting input is the single consolidated HEARTY `*.minorfreq.txt` table wit
 - `transition`
 - `transversion`
 
-## ROH / Window Plotting
+## ROH Window Summary
 
-`ROH_Plot_Tool.R` takes HEARTY `*.windows.txt.gz` files and turns them into visual summaries of low-heterozygosity regions.
+`ROH_Window_Summary.R` takes HEARTY `*.windows.txt.gz` files, defines window-based ROH-like regions, calculates FROH summaries, and plots low-heterozygosity patterns.
 
 The input files are the 100 kb window summaries written by `HEARTY.py`, for example:
 
@@ -278,7 +278,7 @@ For each window, the script reads:
 - the number of HET sites in that window
 - the window heterozygosity proportion
 
-The plotting script then:
+The summary script then:
 - colors windows by heterozygosity proportion
 - flags windows at or below a chosen ROH-like threshold
 - optionally “bridges” single-bin gaps, so an isolated non-ROH bin between two ROH bins can still be treated as part of a continuous ROH block
@@ -291,13 +291,13 @@ So this script is not calling ROH directly from reads or genotype likelihoods. I
 Show help:
 
 ```bash
-Rscript ROH_Plot_Tool.R --help
+Rscript ROH_Window_Summary.R --help
 ```
 
 ### Single-sample usage
 
 ```bash
-Rscript ROH_Plot_Tool.R \
+Rscript ROH_Window_Summary.R \
   --mode single \
   --input results/sample01_het0.25.mincov10.windows.txt.gz \
   --output-pdf results/plots/sample01_roh.pdf
@@ -306,7 +306,7 @@ Rscript ROH_Plot_Tool.R \
 Full example with explicit tuning parameters:
 
 ```bash
-Rscript ROH_Plot_Tool.R \
+Rscript ROH_Window_Summary.R \
   --mode single \
   --input sample.ROH.txt \
   --output-pdf sample.ROH.pdf \
@@ -328,7 +328,7 @@ Single-sample mode writes one PDF for one sample and prints summary statistics t
 ### Batch usage
 
 ```bash
-Rscript ROH_Plot_Tool.R \
+Rscript ROH_Window_Summary.R \
   --mode batch \
   --sample-list roh_samples.tsv \
   --summary-out roh_summary.tsv \
@@ -338,7 +338,7 @@ Rscript ROH_Plot_Tool.R \
 Full batch example:
 
 ```bash
-Rscript ROH_Plot_Tool.R \
+Rscript ROH_Window_Summary.R \
   --mode batch \
   --sample-list Sample_table.txt \
   --summary-out ROH_batch_summary.tsv \
@@ -662,13 +662,13 @@ if you want to exclude very high-depth sites from the retained HET list.
 - `0.05` is always included internally so you can inspect the exploratory minor allele frequency spectrum before choosing stricter thresholds.
 - Window outputs are only written for thresholds you explicitly request with `-t`.
 - The raw basecall table is intentionally left unfiltered for coverage so you can rerun downstream summaries with different `--min-depth` and `--max-depth` values.
-- `Plot_MinorFreq.R`, `ROH_Plot_Tool.R`, and `PSMC_Tool.sh` are standalone helpers and can be run independently of the main HEARTY workflow once the relevant HEARTY outputs exist.
+- `Plot_MinorFreq.R`, `ROH_Window_Summary.R`, and `PSMC_Tool.sh` are standalone helpers and can be run independently of the main HEARTY workflow once the relevant HEARTY outputs exist.
 
 ## Repository Layout
 
 - `HEARTY.py` - main HEARTY caller
 - `Plot_MinorFreq.R` - minor allele frequency overlay plotter
-- `ROH_Plot_Tool.R` - ROH/window plotting utility
+- `ROH_Window_Summary.R` - ROH window summary and plotting utility
 - `PSMC_Tool.sh` - PSMC preparation and run helper
 
 ## Contact
