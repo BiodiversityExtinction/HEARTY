@@ -322,6 +322,7 @@ Rscript ROH_Window_Summary.R \
 Single-sample mode writes one PDF for one sample and prints summary statistics to the terminal, including:
 - number of windows parsed
 - number of scaffolds plotted
+- mean and median heterozygosity across all windows and across non-ROH windows
 - raw and bridged ROH bin counts
 - FROH values for segments longer than 100 kb, 1 Mb, and 5 Mb
 
@@ -382,6 +383,18 @@ The batch summary TSV now includes:
   Mean heterozygosity proportion across all parsed windows.
 - `median_heterozygosity_all_windows`
   Median heterozygosity proportion across all parsed windows.
+- `n_non_roh_raw_windows`
+  Number of windows not classified as ROH using the raw window threshold.
+- `mean_heterozygosity_non_roh_raw_windows`
+  Mean heterozygosity across windows not classified as raw ROH.
+- `median_heterozygosity_non_roh_raw_windows`
+  Median heterozygosity across windows not classified as raw ROH.
+- `n_non_roh_bridged_windows`
+  Number of windows outside ROH after isolated non-ROH gaps between two ROH windows have been bridged.
+- `mean_heterozygosity_non_roh_bridged_windows`
+  Mean heterozygosity across windows outside the bridged ROH definition.
+- `median_heterozygosity_non_roh_bridged_windows`
+  Median heterozygosity across windows outside the bridged ROH definition.
 - `mean_heterozygosity_plotted_windows`
   Mean heterozygosity proportion across the subset of windows that were actually plotted after scaffold-length filtering.
 - `median_heterozygosity_plotted_windows`
@@ -412,6 +425,8 @@ The batch summary TSV now includes:
   Number of original windows contributing to the plotted scaffolds.
 - `bin_size_bp_used`
   Plotting bin size used when aggregating windows for the PDF.
+
+Non-ROH heterozygosity is calculated from the original 100 kb windows before plotting aggregation or scaffold-length filtering. In relative threshold modes, the sample-specific ROH cutoff is first calculated from all parsed windows, and the non-ROH statistics are then calculated after removing windows classified as ROH.
 
 ### Required inputs
 

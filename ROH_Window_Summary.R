@@ -161,9 +161,23 @@ calc_froh_bins <- function(seg_df, genome_size_bp) {
 }
 
 calc_het_stats <- function(df) {
+  values <- df$prop[is.finite(df$prop)]
+  if (length(values) == 0) {
+    return(tibble(mean_het = NA_real_, median_het = NA_real_))
+  }
   tibble(
-    mean_het = mean(df$prop, na.rm = TRUE),
-    median_het = median(df$prop, na.rm = TRUE)
+    mean_het = mean(values),
+    median_het = median(values)
+  )
+}
+
+calc_non_roh_stats <- function(df_windows, flag_col) {
+  non_roh <- df_windows %>% filter(!.data[[flag_col]])
+  stats <- calc_het_stats(non_roh)
+  tibble(
+    n_windows = nrow(non_roh),
+    mean_het = stats$mean_het,
+    median_het = stats$median_het
   )
 }
 
@@ -374,6 +388,8 @@ if (identical(mode, "single")) {
   roh_caption <- format_roh_caption(roh_threshold, roh_threshold_mode, roh_threshold_used)
   genome_bp <- nrow(df) * WINDOW_BP_FOR_FROH
   flags <- build_window_flags(df, roh_threshold_used)
+  non_roh_raw <- calc_non_roh_stats(flags, "roh_raw")
+  non_roh_bridged <- calc_non_roh_stats(flags, "roh_bridged")
   seg_raw <- calc_roh_segments(flags, "roh_raw")
   seg_br <- calc_roh_segments(flags, "roh_bridged")
   froh_raw <- calc_froh_bins(seg_raw, genome_bp)
@@ -400,6 +416,12 @@ if (identical(mode, "single")) {
   cat(sprintf("ROH threshold mode: %s\n", roh_threshold_mode))
   cat(sprintf("ROH threshold input: %.6f\n", roh_threshold))
   cat(sprintf("ROH threshold used: %.6f\n", roh_threshold_used))
+  cat(sprintf("Non-ROH windows (raw definition): %d\n", non_roh_raw$n_windows))
+  cat(sprintf("Mean heterozygosity (non-ROH, raw definition): %.7f\n", non_roh_raw$mean_het))
+  cat(sprintf("Median heterozygosity (non-ROH, raw definition): %.7f\n", non_roh_raw$median_het))
+  cat(sprintf("Non-ROH windows (bridged definition): %d\n", non_roh_bridged$n_windows))
+  cat(sprintf("Mean heterozygosity (non-ROH, bridged definition): %.7f\n", non_roh_bridged$mean_het))
+  cat(sprintf("Median heterozygosity (non-ROH, bridged definition): %.7f\n", non_roh_bridged$median_het))
   cat(sprintf("Raw ROH bins flagged: %d\n", sum(built$plot_df$roh_hit_raw, na.rm = TRUE)))
   cat(sprintf("Bridged ROH bins flagged: %d\n", sum(built$plot_df$roh_hit_bridged, na.rm = TRUE)))
   cat(sprintf("Genome size used for FROH: %.0f bp (n_windows=%d x %d bp)\n", genome_bp, nrow(df), WINDOW_BP_FOR_FROH))
@@ -442,6 +464,8 @@ if (identical(mode, "single")) {
 
     genome_bp <- nrow(df) * WINDOW_BP_FOR_FROH
     flags <- build_window_flags(df, roh_threshold_used)
+    non_roh_raw <- calc_non_roh_stats(flags, "roh_raw")
+    non_roh_bridged <- calc_non_roh_stats(flags, "roh_bridged")
     seg_raw <- calc_roh_segments(flags, "roh_raw")
     seg_br <- calc_roh_segments(flags, "roh_bridged")
     froh_raw <- calc_froh_bins(seg_raw, genome_bp)
@@ -466,6 +490,12 @@ if (identical(mode, "single")) {
       n_windows = nrow(df),
       mean_heterozygosity_all_windows = het_stats_all$mean_het,
       median_heterozygosity_all_windows = het_stats_all$median_het,
+      n_non_roh_raw_windows = non_roh_raw$n_windows,
+      mean_heterozygosity_non_roh_raw_windows = non_roh_raw$mean_het,
+      median_heterozygosity_non_roh_raw_windows = non_roh_raw$median_het,
+      n_non_roh_bridged_windows = non_roh_bridged$n_windows,
+      mean_heterozygosity_non_roh_bridged_windows = non_roh_bridged$mean_het,
+      median_heterozygosity_non_roh_bridged_windows = non_roh_bridged$median_het,
       genome_bp_for_froh = genome_bp,
       roh_threshold_mode = roh_threshold_mode,
       roh_threshold_input = roh_threshold,
