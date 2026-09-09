@@ -2,6 +2,7 @@
 
 import argparse
 import hashlib
+import mmap
 import os
 import random
 import shlex
@@ -9,6 +10,8 @@ import shutil
 import subprocess
 import sys
 import tempfile
+from contextlib import ExitStack, closing
+from itertools import zip_longest
 from pathlib import Path
 
 
@@ -28,10 +31,12 @@ USAGE:
 REQUIRED ARGUMENTS:
     -b, --bam FILE             BAM file for analysis
     -l, --bam-list FILE        Two-column file: BAM path and output prefix
-    -o, --out-prefix STR       Output prefix for all files (required for single BAM)
+    --basecall-file FILE       Existing basecall .txt or .txt.gz; run downstream summaries only
+    -o, --out-prefix STR       Output prefix (required for single BAM or basecall input)
 
 OPTIONAL ARGUMENTS:
     -d, --outdir DIR           Output directory [default: results]
+    --ref FILE                Reference FASTA with .fai index; add Ref to the basecall table
     -m, --min-depth INT        Minimum depth for downstream summaries [default: 10]
     -M, --max-depth INT        Maximum depth for downstream summaries
     -t, --threshold FLOAT      Extra het calling threshold for window outputs (can be repeated; 0.05 always runs internally)
@@ -53,11 +58,13 @@ RUN OPTIONS:
 
 EXAMPLES:
     hearty -b sample.bam -o sample01
+    hearty -b sample.bam -o sample01 --ref reference.fa
     hearty -l bam_list.txt
     hearty -b sample.bam -o sample01 -t 0.10 -t 0.15
     hearty -b sample.bam -o sample01 -r "chr1:1-50000000"
     hearty -b sample.bam -o sample01 --downsample-depth 10 --downsample-reps 10
     hearty -b sample.bam -o sample01 --angsd-params "-minmapq 30 -baq 1"
+    hearty --basecall-file sample01.basecall.txt.gz -o sample01 -d summaries -m 20 -M 60 -t 0.25
 """
     print(help_text)
 
@@ -243,12 +250,15 @@ def build_outputs(prefix, outdir, min_depth, max_depth, output_thresholds, downs
     }
 
 
-def print_output_summary(prefix, outputs):
+def print_output_summary(prefix, outputs, basecall_input=False):
     print(f"Completed sample: {prefix}")
+    if basecall_input:
+        print(f"Basecall input (unchanged): {outputs['basecall']}")
     print("Generated files:")
-    print(f"  {outputs['pos_gz']}")
-    print(f"  {outputs['counts_gz']}")
-    print(f"  {outputs['basecall']}")
+    if not basecall_input:
+        print(f"  {outputs['pos_gz']}")
+        print(f"  {outputs['counts_gz']}")
+        print(f"  {outputs['basecall']}")
     print(f"  {outputs['minorfreq']['table']}")
     for threshold, output_path in outputs["windows"].items():
         print(f"  {output_path}")
@@ -257,6 +267,10 @@ def print_output_summary(prefix, outputs):
 
 
 def iter_compressed_lines(path, compression):
+    if Path(path).suffix != ".gz":
+        with Path(path).open() as handle:
+            yield from handle
+        return
     proc = subprocess.Popen(
         compression["decompress_cmd"] + [str(path)],
         stdout=subprocess.PIPE,
@@ -273,6 +287,9 @@ def iter_compressed_lines(path, compression):
     finally:
         if proc.stdout:
             proc.stdout.close()
+        if proc.poll() is None:
+            proc.terminate()
+        proc.wait()
         if proc.stderr:
             proc.stderr.close()
 
@@ -298,6 +315,14 @@ def write_compressed_lines(output_path, compression, write_fn):
                 if returncode != 0:
                     raise subprocess.CalledProcessError(returncode, compression["compress_cmd"], stderr=stderr)
             finally:
+                if proc.poll() is None:
+                    proc.terminate()
+                    proc.wait()
+                if proc.stdin and not proc.stdin.closed:
+                    try:
+                        proc.stdin.close()
+                    except BrokenPipeError:
+                        pass
                 if proc.stderr:
                     proc.stderr.close()
         tmp_path.replace(output_path)
@@ -428,7 +453,82 @@ def basecall_has_count_columns(header_names):
     return required.issubset(set(header_names))
 
 
-def basecall_table(pos_gz, counts_gz, output_path, thresholds, compression, dry_run=False):
+class IndexedReference:
+    """Read one-based FASTA positions using a faidx index without loading the genome."""
+
+    def __init__(self, path):
+        self.path = Path(path).expanduser().resolve()
+        self.index = {}
+
+    def __enter__(self):
+        index_path = Path(str(self.path) + ".fai")
+        if not self.path.is_file():
+            raise ValueError(f"Reference FASTA not found: {self.path}")
+        if not index_path.is_file():
+            raise ValueError(f"Reference index not found: {index_path}. Create it with: samtools faidx {shlex.quote(str(self.path))}")
+        with index_path.open() as handle:
+            for line in handle:
+                fields = line.rstrip("\n").split("\t")
+                try:
+                    name = fields[0]
+                    length, offset, bases, width = map(int, fields[1:5])
+                    if not name or name in self.index or length <= 0 or offset < 0 or bases <= 0 or width < bases:
+                        raise ValueError
+                except (ValueError, IndexError):
+                    raise ValueError(f"Invalid FASTA index entry in {index_path}: {line.strip()}") from None
+                self.index[name] = (length, offset, bases, width)
+        if not self.index:
+            raise ValueError(f"Empty FASTA index: {index_path}")
+        with self.path.open("rb") as handle:
+            if handle.read(1) != b">":
+                raise ValueError("--ref requires an uncompressed FASTA and matching .fai index")
+            self.sequence = mmap.mmap(handle.fileno(), 0, access=mmap.ACCESS_READ)
+        return self
+
+    def __exit__(self, *exc):
+        self.sequence.close()
+
+    def base(self, chrom, pos):
+        if chrom not in self.index:
+            raise ValueError(f"Contig {chrom!r} is absent from reference {self.path}; use the same assembly as the BAM")
+        length, offset, bases, width = self.index[chrom]
+        if not 1 <= pos <= length:
+            raise ValueError(f"Reference position out of range: {chrom}:{pos} (length {length})")
+        location = offset + ((pos - 1) // bases) * width + (pos - 1) % bases
+        if location >= len(self.sequence):
+            raise ValueError(f"FASTA index does not match reference at {chrom}:{pos}; rebuild the .fai index")
+        base = chr(self.sequence[location]).upper()
+        if base not in "ACGTRYSWKMBDHVN":
+            raise ValueError(f"Invalid reference base at {chrom}:{pos}; check the FASTA and rebuild its .fai index")
+        return base
+
+
+def annotate_basecall_reference(path, reference_path, compression, dry_run=False):
+    print(f"Adding/updating Ref in {path} from {reference_path}")
+    if dry_run:
+        return
+
+    def _writer(out_handle):
+        with IndexedReference(reference_path) as reference, closing(iter_compressed_lines(path, compression)) as lines:
+            header = next(lines).rstrip("\n").split("\t")
+            ref_idx = header.index("Ref") if "Ref" in header else len(header)
+            if ref_idx == len(header):
+                header.append("Ref")
+            out_handle.write("\t".join(header) + "\n")
+            for line in lines:
+                fields = line.rstrip("\n").split("\t")
+                base = reference.base(fields[0], int(fields[1]))
+                if ref_idx == len(fields):
+                    fields.append(base)
+                else:
+                    fields[ref_idx] = base
+                out_handle.write("\t".join(fields) + "\n")
+
+    write_compressed_lines(path, compression, _writer)
+
+
+def basecall_table(pos_gz, counts_gz, output_path, thresholds, compression, dry_run=False,
+                   reference_path=None, preserve_reference_from=None):
     preview = (
         f"{quote_cmd(compression['decompress_cmd'])} {shlex.quote(str(pos_gz))} + "
         f"{quote_cmd(compression['decompress_cmd'])} {shlex.quote(str(counts_gz))} "
@@ -440,9 +540,17 @@ def basecall_table(pos_gz, counts_gz, output_path, thresholds, compression, dry_
         return
 
     def _writer(out_handle):
-        pos_iter = iter_compressed_lines(pos_gz, compression)
-        counts_iter = iter_compressed_lines(counts_gz, compression)
+        with ExitStack() as stack:
+            reference = stack.enter_context(IndexedReference(reference_path)) if reference_path else None
+            old_lines = None
+            if preserve_reference_from and not reference:
+                old_lines = stack.enter_context(closing(iter_compressed_lines(preserve_reference_from, compression)))
+                ref_idx = next(old_lines).rstrip("\n").split("\t").index("Ref")
+            pos_iter = stack.enter_context(closing(iter_compressed_lines(pos_gz, compression)))
+            counts_iter = stack.enter_context(closing(iter_compressed_lines(counts_gz, compression)))
+            _write_rows(out_handle, reference, old_lines, ref_idx if old_lines else None, pos_iter, counts_iter)
 
+    def _write_rows(out_handle, reference, old_lines, ref_idx, pos_iter, counts_iter):
         first_pos = next(pos_iter, None)
         if first_pos is None:
             raise RuntimeError(f"No positions found in {pos_gz}")
@@ -451,9 +559,15 @@ def basecall_table(pos_gz, counts_gz, output_path, thresholds, compression, dry_
         header_cols = [count_col("A"), count_col("C"), count_col("G"), count_col("T"), "A", "C", "G", "T"]
         for threshold in thresholds:
             header_cols.extend([threshold_base_col(threshold), threshold_status_col(threshold)])
+        if reference or old_lines:
+            header_cols.append("Ref")
         out_handle.write(first_pos.rstrip("\n") + "\t" + "\t".join(header_cols) + "\n")
-        for pos_line, count_line in zip(pos_iter, counts_iter):
+        for pos_line, count_line in zip_longest(pos_iter, counts_iter):
+            if pos_line is None or count_line is None:
+                raise ValueError("ANGSD position and count files have different numbers of rows")
             count_fields = count_line.strip().split()
+            if len(count_fields) != 4:
+                raise ValueError("Expected four nucleotide counts per row for a single sample")
             raw_counts = [int(value) for value in count_fields[:4]]
             freqs = counts_to_freqs(raw_counts)
             rendered = [str(value) for value in raw_counts]
@@ -461,10 +575,20 @@ def basecall_table(pos_gz, counts_gz, output_path, thresholds, compression, dry_
             for threshold in thresholds:
                 base, status = classify_counts_for_threshold(freqs, threshold)
                 rendered.extend([base, status])
+            if reference:
+                pos_fields = pos_line.split()
+                rendered.append(reference.base(pos_fields[0], int(pos_fields[1])))
+            elif old_lines:
+                old_fields = next(old_lines, "").rstrip("\n").split("\t")
+                if old_fields[:2] != pos_line.split()[:2]:
+                    raise ValueError("Existing Ref coordinates do not match ANGSD positions; supply --ref to rebuild")
+                rendered.append(old_fields[ref_idx])
             out_handle.write(pos_line.rstrip("\n"))
             out_handle.write("\t")
             out_handle.write("\t".join(rendered))
             out_handle.write("\n")
+        if old_lines and next(old_lines, None) is not None:
+            raise ValueError("Existing Ref table has additional positions; supply --ref to rebuild")
 
     write_compressed_lines(output_path, compression, _writer)
 
@@ -476,6 +600,11 @@ def get_basecall_header_indices(basecall_gz, compression):
 
 def get_site_call(fields, header_index, threshold, downsample_depth=None, downsample_reps=10, downsample_seed=1):
     if downsample_depth is None:
+        if threshold_base_col(threshold) not in header_index or threshold_status_col(threshold) not in header_index:
+            counts = [int(fields[header_index[count_col(base)]]) for base in "ACGT"]
+            freqs = counts_to_freqs(counts)
+            base, status = classify_counts_for_threshold(freqs, threshold)
+            return freqs, base, status
         base = fields[header_index[threshold_base_col(threshold)]]
         status = fields[header_index[threshold_status_col(threshold)]]
         freqs = [
@@ -800,6 +929,8 @@ def run_single_bam(bam_path, prefix, args):
         angsd_cmd.extend(["-rf", rf])
     elif reg:
         angsd_cmd.extend(["-r", reg])
+    if args.ref:
+        angsd_cmd.extend(["-ref", args.ref])
     if extra_angsd_params:
         angsd_cmd.extend(extra_angsd_params)
 
@@ -825,8 +956,6 @@ def run_single_bam(bam_path, prefix, args):
                 reasons.append("raw count columns")
             print(f"Rebuilding existing basecall table to add: {', '.join(reasons)}")
             if outputs["pos_gz"].exists() and outputs["counts_gz"].exists():
-                if not args.dry_run:
-                    outputs["basecall"].unlink(missing_ok=True)
                 basecall_table(
                     outputs["pos_gz"],
                     outputs["counts_gz"],
@@ -834,6 +963,8 @@ def run_single_bam(bam_path, prefix, args):
                     active_thresholds,
                     compression,
                     dry_run=args.dry_run,
+                    reference_path=args.ref,
+                    preserve_reference_from=outputs["basecall"] if "Ref" in header_index else None,
                 )
             else:
                 print(
@@ -845,6 +976,8 @@ def run_single_bam(bam_path, prefix, args):
         else:
             active_thresholds = existing_thresholds
             print(f"Reusing existing basecall table: {outputs['basecall']}")
+            if args.ref:
+                annotate_basecall_reference(outputs["basecall"], args.ref, compression, dry_run=args.dry_run)
     else:
         if args.reuse_existing and outputs["pos_gz"].exists() and outputs["counts_gz"].exists() and not args.force:
             print(f"Reusing existing ANGSD counts: {outputs['pos_gz']} and {outputs['counts_gz']}")
@@ -854,7 +987,6 @@ def run_single_bam(bam_path, prefix, args):
             else:
                 with log_path.open("w") as log_handle:
                     run_command(angsd_cmd, stdout=log_handle, stderr=subprocess.STDOUT)
-        maybe_remove(outputs["basecall"], args.force)
         basecall_table(
             outputs["pos_gz"],
             outputs["counts_gz"],
@@ -862,12 +994,49 @@ def run_single_bam(bam_path, prefix, args):
             requested_thresholds,
             compression,
             dry_run=args.dry_run,
+            reference_path=args.ref,
         )
         active_thresholds = list(requested_thresholds)
 
+    return run_downstream(prefix, outputs, args, compression)
+
+
+def run_from_basecall(prefix, args):
+    source = Path(args.basecall_file).expanduser().resolve()
+    if not source.is_file():
+        raise ValueError(f"Basecall file not found: {source}")
+    compression = compression_tools(args.cores)
+    header = get_basecall_header_indices(source, compression)
+    required = {"totDepth", "A", "C", "G", "T"}
+    missing = required - header.keys()
+    if missing:
+        raise ValueError(f"Basecall file is missing columns: {', '.join(sorted(missing))}")
+    has_counts = basecall_has_count_columns(header)
+    missing_thresholds = [t for t in args.threshold
+                          if threshold_base_col(t) not in header or threshold_status_col(t) not in header]
+    if args.downsample_depth is not None and not has_counts:
+        raise ValueError("Downsampling requires count_A, count_C, count_G, and count_T in the basecall file")
+    if missing_thresholds and not has_counts:
+        raise ValueError(f"Basecall file lacks calls for thresholds {missing_thresholds}; raw count columns are required to calculate them")
+    outputs = build_outputs(prefix, args.outdir, args.min_depth, args.max_depth,
+                            [t for t in args.threshold if t != DEFAULT_THRESHOLD],
+                            args.downsample_depth, args.downsample_reps)
+    outputs["basecall"] = source
+    targets = [outputs["minorfreq"]["table"], *outputs["windows"].values(), *outputs["windows_trv"].values()]
+    for target in targets:
+        if target.resolve() == source or (target.exists() and target.samefile(source)):
+            raise ValueError(f"Output would overwrite the input basecall file: {target}")
+    check_overwrite(targets, args.force or args.reuse_existing)
+    print(f"Using basecall file: {source}")
+    if missing_thresholds:
+        print(f"Calculating thresholds from raw counts without modifying input: {missing_thresholds}")
+    if not args.dry_run:
+        outputs["outdir"].mkdir(parents=True, exist_ok=True)
+    return run_downstream(prefix, outputs, args, compression, basecall_input=True)
+
+
+def run_downstream(prefix, outputs, args, compression, basecall_input=False):
     first_threshold = DEFAULT_THRESHOLD
-    for minorfreq_output in outputs["minorfreq"].values():
-        minorfreq_output.unlink(missing_ok=True)
     minorfreq_from_basecall(
         outputs["basecall"],
         first_threshold,
@@ -882,7 +1051,6 @@ def run_single_bam(bam_path, prefix, args):
     )
 
     for threshold, output_path in outputs["windows"].items():
-        output_path.unlink(missing_ok=True)
         build_window_summary(
             outputs["basecall"],
             threshold,
@@ -897,7 +1065,6 @@ def run_single_bam(bam_path, prefix, args):
         )
 
     for threshold, output_path in outputs["windows_trv"].items():
-        output_path.unlink(missing_ok=True)
         build_window_summary(
             outputs["basecall"],
             threshold,
@@ -912,7 +1079,7 @@ def run_single_bam(bam_path, prefix, args):
             dry_run=args.dry_run,
         )
 
-    print_output_summary(prefix, outputs)
+    print_output_summary(prefix, outputs, basecall_input=basecall_input)
     return True
 
 
@@ -931,15 +1098,17 @@ def main():
     bam_group = required.add_mutually_exclusive_group(required=True)
     bam_group.add_argument("-b", "--bam", metavar="FILE", help="BAM file for analysis")
     bam_group.add_argument("-l", "--bam-list", metavar="FILE", help="Two-column file: BAM path and output prefix")
+    bam_group.add_argument("--basecall-file", metavar="FILE", help="Existing basecall .txt or .txt.gz for downstream summaries")
     required.add_argument(
         "-o",
         "--out-prefix",
         metavar="STR",
-        help="Output prefix (required for single BAM, ignored for BAM list)",
+        help="Output prefix (required for single BAM or basecall input, ignored for BAM list)",
     )
 
     optional = parser.add_argument_group("Optional arguments")
     optional.add_argument("-d", "--outdir", default="results", metavar="DIR", help="Output directory")
+    optional.add_argument("--ref", metavar="FILE", help="Indexed reference FASTA; add Ref to the basecall table")
     optional.add_argument("-m", "--min-depth", type=int, default=10, metavar="INT", help="Minimum depth for downstream summaries")
     optional.add_argument("-M", "--max-depth", type=int, metavar="INT", help="Maximum depth for downstream summaries")
     optional.add_argument("--downsample-depth", type=int, metavar="INT", help="Downsample each site to this depth for downstream summaries")
@@ -980,9 +1149,21 @@ def main():
         show_help()
         sys.exit(0)
 
-    if args.bam and not args.out_prefix:
-        print("Error: --out-prefix is required when using --bam", file=sys.stderr)
+    if (args.bam or args.basecall_file) and not args.out_prefix:
+        print("Error: --out-prefix is required with --bam or --basecall-file", file=sys.stderr)
         sys.exit(1)
+    if args.basecall_file and (args.regions or args.rf or args.angsd_params):
+        parser.error("--regions, --rf, and --angsd-params cannot be used with --basecall-file; these settings require ANGSD")
+    if args.basecall_file and args.ref:
+        parser.error("--basecall-file is read-only; use --ref when creating the basecall table, or with --bam and --reuse-existing to annotate it")
+    if args.ref:
+        if any(option.lower().split("=", 1)[0] == "-ref" for option in parse_angsd_params(args.angsd_params)):
+            parser.error("Supply the reference using --ref only, not also -ref inside --angsd-params")
+        try:
+            with IndexedReference(args.ref) as reference:
+                args.ref = str(reference.path)
+        except (ValueError, OSError) as exc:
+            parser.error(str(exc))
     if args.downsample_depth is not None:
         if args.downsample_depth <= 0:
             print("Error: --downsample-depth must be a positive integer", file=sys.stderr)
@@ -997,7 +1178,12 @@ def main():
             thresholds.append(threshold)
     args.threshold = thresholds
 
-    if args.bam_list:
+    if args.basecall_file:
+        try:
+            run_from_basecall(args.out_prefix, args)
+        except (ValueError, OSError, subprocess.CalledProcessError) as exc:
+            parser.error(str(exc))
+    elif args.bam_list:
         bam_list = read_file_list(args.bam_list, "bams")
         print(f"Found {len(bam_list)} BAM files to process")
         success_count = 0
@@ -1014,4 +1200,8 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except (ValueError, OSError, subprocess.CalledProcessError) as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        sys.exit(1)

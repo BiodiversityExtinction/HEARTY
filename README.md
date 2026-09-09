@@ -101,7 +101,8 @@ python3 HEARTY.py [OPTIONS]
 Required arguments:
   -b, --bam FILE             BAM file for analysis
   -l, --bam-list FILE        Two-column file: BAM path and output prefix
-  -o, --out-prefix STR       Output prefix for all files (required for single BAM)
+  --basecall-file FILE       Existing basecall .txt or .txt.gz; downstream summaries only
+  -o, --out-prefix STR       Output prefix (required for single BAM or basecall input)
 
 Optional arguments:
   -d, --outdir DIR           Output directory [default: results]
@@ -113,6 +114,7 @@ Optional arguments:
   --downsample-seed INT      Seed used to make per-site downsampling deterministic [default: 1]
   -c, --cores INT            Number of ANGSD/compression threads [default: 8]
   --angsd PATH               ANGSD executable [default: auto]
+  --ref FILE                Reference FASTA with .fai index; add Ref to the basecall table
   --angsd-params STR         Extra ANGSD parameters, quoted as one string
   -r, --regions STR          Region string for ANGSD -r
   -f, --rf FILE              Regions file for ANGSD -rf
@@ -121,6 +123,25 @@ Optional arguments:
   --reuse-existing           Reuse existing ANGSD/basecall outputs when available
   -h, --help                 Show help
 ```
+
+### Reusing a shared basecall file
+
+Use `--basecall-file` as an alternative to `--bam` or `--bam-list` to generate minor-frequency and window summaries directly from an existing table. No BAM, ANGSD executable, or `.pos.gz`/`.counts.gz` files are needed.
+
+```bash
+python3 HEARTY.py \
+  --basecall-file /path/to/SW_07_newtool.basecall.txt.gz \
+  -o SW_07_depth20_60 \
+  -d results/depth_comparison \
+  -m 20 -M 60 \
+  -t 0.20 -t 0.25
+```
+
+The source table is never rewritten, even with `--force`. Plain `.txt` and gzip-compressed `.txt.gz` tables are supported. Set `--out-prefix` and `--outdir` independently of the source filename so multiple runs can share the same input. Choose distinct output prefixes or directories for combinations that would otherwise produce the same filenames, such as different downsampling seeds.
+
+Existing threshold-specific calls are reused. When a requested threshold is absent, HEARTY calculates its calls from `count_A`, `count_C`, `count_G`, and `count_T` during summarization without adding columns to the source file. Older tables without counts must already contain the requested `Base_<threshold>` and `Status_<threshold>` columns, including `0.05` for minor-frequency output. Downsampling always requires raw counts.
+
+The usual `--min-depth`, `--max-depth`, and downsampling options apply. `--reuse-existing` is unnecessary to select this input mode; existing downstream outputs require `--force` or `--reuse-existing` to refresh them. `--dry-run` validates the input header and previews summaries without changing files. Region and custom ANGSD settings cannot be applied to this input mode: regenerate the original counts if those filters need changing.
 
 ### BAM list format
 
@@ -170,6 +191,28 @@ The value must be quoted as one string. HEARTY appends these options to the ANGS
 
 This option is intended for ANGSD filtering and model settings such as mapping-quality, base-alignment-quality, or BAQ-related choices. HEARTY still manages the required counting/output options, including `-i`, `-out`, `-docounts`, `-dumpCounts`, and `-nThreads`.
 
+### Reference allele annotation
+
+Supply `--ref` to add the reference nucleotide at each retained position to the basecall table:
+
+```bash
+# Once per reference, if the index does not already exist:
+samtools faidx /path/to/reference.fa
+
+python3 HEARTY.py \
+  -b sample.bam \
+  --ref /path/to/reference.fa \
+  -o sample01 -d results -t 0.25
+```
+
+The FASTA must be **uncompressed**, with its matching `.fai` index alongside it. It must use the same assembly and contig names as the BAM. HEARTY looks up the one-based genomic coordinates using the index without loading the whole genome into memory. Missing contigs and out-of-range positions are errors, not silently assigned `N`.
+
+The optional `Ref` column is appended to the table. Bases are uppercase; `N` and IUPAC ambiguity codes are preserved as annotations. `Ref` is the nucleotide in the supplied assembly, **not necessarily the sample's major allele**. It does not change HEARTY's count-based calls, minor-frequency calculations, depth filters, or downsampling. The reference is also passed to ANGSD as `-ref` for options that need it, such as BAQ; supply it through `--ref`, not additionally through `--angsd-params`.
+
+To annotate an existing basecall table without rerunning ANGSD, repeat its original BAM/output-prefix command with `--ref` and `--reuse-existing`. HEARTY adds or updates `Ref` atomically; it preserves existing calls and counts. If you also request new threshold columns, the normal rebuild from existing `.pos.gz`/`.counts.gz` applies. Subsequent threshold rebuilds preserve `Ref` even when `--ref` is omitted. Adding a reference during reuse does not retroactively change ANGSD filters such as BAQ: regenerate the counts if those settings need changing.
+
+`--ref` is not accepted with the read-only `--basecall-file` input mode, which never edits or copies the source table. Annotate the original table first if needed; summaries can read tables with or without `Ref`. Without `--ref`, newly generated tables retain the existing format without a reference column.
+
 ### Basecall format
 
 The basecall table is gzip-compressed and tab-delimited. It contains:
@@ -181,6 +224,7 @@ The basecall table is gzip-compressed and tab-delimited. It contains:
   - `count_G`
   - `count_T`
 - frequency columns: `A`, `C`, `G`, `T`
+- optional `Ref` column (when `--ref` was supplied), containing the reference nucleotide
 - for each threshold:
   - `Base_<threshold>`
   - `Status_<threshold>`
@@ -316,7 +360,8 @@ Rscript ROH_Window_Summary.R \
   --bin-size-bp 500000 \
   --fallback-resolution 100 \
   --roh-threshold 0.0001 \
-  --roh-threshold-mode absolute
+  --roh-threshold-mode absolute \
+  --froh-cutoffs "100kb,1mb,5mb"
 ```
 
 Single-sample mode writes one PDF for one sample and prints summary statistics to the terminal, including:
@@ -324,7 +369,7 @@ Single-sample mode writes one PDF for one sample and prints summary statistics t
 - number of scaffolds plotted
 - mean and median heterozygosity across all windows and across non-ROH windows
 - raw and bridged ROH bin counts
-- FROH values for segments longer than 100 kb, 1 Mb, and 5 Mb
+- FROH values for segments longer than the requested cutoffs, by default 100 kb, 1 Mb, and 5 Mb
 
 ### Batch usage
 
@@ -350,7 +395,8 @@ Rscript ROH_Window_Summary.R \
   --bin-size-bp 500000 \
   --fallback-resolution 100 \
   --roh-threshold 0.0001 \
-  --roh-threshold-mode absolute
+  --roh-threshold-mode absolute \
+  --froh-cutoffs "100kb,1mb,5mb"
 ```
 
 Batch list format:
@@ -411,14 +457,10 @@ The batch summary TSV now includes:
   Number of raw ROH segments before bridging.
 - `n_bridged_segments`
   Number of ROH segments after single-bin bridging is applied.
-- `raw_froh_gt100kb`, `raw_froh_gt1Mb`, `raw_froh_gt5Mb`
-  FROH values from raw ROH segments longer than 100 kb, 1 Mb, and 5 Mb.
-- `bridged_froh_gt100kb`, `bridged_froh_gt1Mb`, `bridged_froh_gt5Mb`
-  FROH values from bridged ROH segments longer than 100 kb, 1 Mb, and 5 Mb.
-- `raw_roh_bp_gt100kb`, `raw_roh_bp_gt1Mb`, `raw_roh_bp_gt5Mb`
-  Total ROH base pairs contributing to each raw FROH class.
-- `bridged_roh_bp_gt100kb`, `bridged_roh_bp_gt1Mb`, `bridged_roh_bp_gt5Mb`
-  Total ROH base pairs contributing to each bridged FROH class.
+- `raw_froh_gt<cutoff>` and `bridged_froh_gt<cutoff>`
+  FROH values from raw and bridged ROH segments longer than each requested cutoff. With the defaults, these are `raw_froh_gt100kb`, `raw_froh_gt1Mb`, `raw_froh_gt5Mb`, and the corresponding `bridged_froh_*` columns.
+- `raw_roh_bp_gt<cutoff>` and `bridged_roh_bp_gt<cutoff>`
+  Total ROH base pairs contributing to each requested raw and bridged FROH class.
 - `scaffolds_plotted`
   Number of scaffolds retained for plotting after the minimum-length filter.
 - `rows_used_for_plot`
@@ -460,6 +502,8 @@ This gives you two related views:
   `mean` means the effective cutoff is `--roh-threshold * mean window heterozygosity`.
   `median` means the effective cutoff is `--roh-threshold * median window heterozygosity`.
   For example, `--roh-threshold 0.2 --roh-threshold-mode mean` calls windows ROH-like if they are below 20% of that sample's mean window heterozygosity.
+- `--froh-cutoffs`
+  Comma-separated ROH segment-length cutoffs used for FROH reporting. Values may use `bp`, `kb`, `mb`, or `gb`; values without a unit are interpreted as base pairs. The default is `100kb,1mb,5mb`. For example, `--froh-cutoffs "100kb,500kb,2mb,10mb"` reports FROH and ROH base pairs for all four requested length classes.
 - `--fill-cap`
   Caps the displayed color scale at a maximum heterozygosity value so very high windows do not dominate the gradient. This changes the visualization, not the ROH calling itself.
   You can also use `--fill-cap auto` to derive the cap from the mean heterozygosity of the input windows.
@@ -477,10 +521,18 @@ This gives you two related views:
 
 ### FROH in the outputs
 
-The script reports FROH for both raw and bridged ROH using segment cutoffs:
+The script reports FROH for both raw and bridged ROH using these default segment cutoffs:
 - `>100 kb`
 - `>1 Mb`
 - `>5 Mb`
+
+Custom cutoffs can be supplied with, for example:
+
+```bash
+--froh-cutoffs "100kb,500kb,2mb,10mb"
+```
+
+The requested cutoffs are sorted, duplicate values are removed, and the summary TSV columns are generated from the resulting labels. Decimal labels are made column-safe, so a cutoff of `2.5mb` produces columns ending in `gt2p5Mb`.
 
 The genome size denominator is:
 - `number_of_windows * 100,000 bp`

@@ -24,6 +24,7 @@ usage <- paste(
   "  --fallback-resolution 100",
   "  --roh-threshold 0.0001",
   "  --roh-threshold-mode absolute",
+  "  --froh-cutoffs 100kb,1mb,5mb",
   "",
   "Single-mode required:",
   "  --input <path/to/sample.windows.txt.gz>",
@@ -153,11 +154,86 @@ calc_roh_segments <- function(df_windows, flag_col) {
     summarise(seg_start = min(start), seg_end = max(end), len_bp = seg_end - seg_start + 1L, .groups = "drop")
 }
 
-calc_froh_bins <- function(seg_df, genome_size_bp) {
-  bins <- c(1e5, 1e6, 5e6)
-  labels <- c("gt100kb", "gt1Mb", "gt5Mb")
-  roh_bp <- vapply(bins, function(b) sum(seg_df$len_bp[seg_df$len_bp > b], na.rm = TRUE), numeric(1))
-  tibble(metric = labels, roh_bp = roh_bp, froh = roh_bp / genome_size_bp)
+format_cutoff_number <- function(value) {
+  rendered <- format(value, scientific = FALSE, trim = TRUE, digits = 12)
+  if (grepl(".", rendered, fixed = TRUE)) {
+    rendered <- sub("0+$", "", rendered)
+    rendered <- sub("\\.$", "", rendered)
+  }
+  rendered
+}
+
+format_froh_cutoff <- function(bp) {
+  if (bp >= 1e9) {
+    value <- bp / 1e9
+    unit <- "Gb"
+  } else if (bp >= 1e6) {
+    value <- bp / 1e6
+    unit <- "Mb"
+  } else if (bp >= 1e3) {
+    value <- bp / 1e3
+    unit <- "kb"
+  } else {
+    value <- bp
+    unit <- "bp"
+  }
+  value_label <- format_cutoff_number(value)
+  list(
+    display = paste(value_label, unit),
+    metric = paste0("gt", gsub("\\.", "p", value_label), unit)
+  )
+}
+
+parse_froh_cutoffs <- function(raw) {
+  tokens <- trimws(strsplit(raw, ",", fixed = TRUE)[[1]])
+  tokens <- tokens[tokens != ""]
+  if (length(tokens) == 0) {
+    stop("--froh-cutoffs must contain at least one cutoff", call. = FALSE)
+  }
+
+  parsed_bp <- vapply(tokens, function(token) {
+    matched <- stringr::str_match(tolower(token), "^([0-9]*\\.?[0-9]+)\\s*(bp|kb|mb|gb)?$")
+    if (is.na(matched[1, 1])) {
+      stop(sprintf("Invalid FROH cutoff '%s'; use values such as 100kb, 1mb, or 500000bp", token), call. = FALSE)
+    }
+    value <- as.numeric(matched[1, 2])
+    unit <- matched[1, 3]
+    if (is.na(unit) || unit == "") unit <- "bp"
+    multiplier <- switch(unit, bp = 1, kb = 1e3, mb = 1e6, gb = 1e9, 1)
+    bp <- value * multiplier
+    if (!is.finite(bp) || bp <= 0) {
+      stop("FROH cutoffs must be greater than zero", call. = FALSE)
+    }
+    round(bp)
+  }, numeric(1))
+
+  parsed_bp <- sort(unique(parsed_bp))
+  labels <- lapply(parsed_bp, format_froh_cutoff)
+  tibble(
+    cutoff_bp = parsed_bp,
+    cutoff_label = vapply(labels, `[[`, character(1), "display"),
+    metric = vapply(labels, `[[`, character(1), "metric")
+  )
+}
+
+calc_froh_bins <- function(seg_df, genome_size_bp, froh_cutoffs) {
+  roh_bp <- vapply(
+    froh_cutoffs$cutoff_bp,
+    function(cutoff) sum(seg_df$len_bp[seg_df$len_bp > cutoff], na.rm = TRUE),
+    numeric(1)
+  )
+  froh <- if (genome_size_bp > 0) roh_bp / genome_size_bp else rep(NA_real_, length(roh_bp))
+  froh_cutoffs %>% mutate(roh_bp = roh_bp, froh = froh)
+}
+
+build_froh_summary_columns <- function(froh_raw, froh_bridged) {
+  values <- c(
+    setNames(as.list(froh_raw$froh), paste0("raw_froh_", froh_raw$metric)),
+    setNames(as.list(froh_raw$roh_bp), paste0("raw_roh_bp_", froh_raw$metric)),
+    setNames(as.list(froh_bridged$froh), paste0("bridged_froh_", froh_bridged$metric)),
+    setNames(as.list(froh_bridged$roh_bp), paste0("bridged_roh_bp_", froh_bridged$metric))
+  )
+  tibble::as_tibble_row(values, .name_repair = "minimal")
 }
 
 calc_het_stats <- function(df) {
@@ -364,6 +440,7 @@ bin_size_bp <- as_num(get_opt("bin-size-bp", "500000"), "bin-size-bp")
 fallback_resolution <- as_int(get_opt("fallback-resolution", "100"), "fallback-resolution")
 roh_threshold <- as_num(get_opt("roh-threshold", "0.0001"), "roh-threshold")
 roh_threshold_mode <- tolower(get_opt("roh-threshold-mode", "absolute"))
+froh_cutoffs <- parse_froh_cutoffs(get_opt("froh-cutoffs", "100kb,1mb,5mb"))
 
 if (min_length_mb <= 0 || max_scaffolds <= 0 || fill_cap_scale <= 0 || bin_size_bp <= 0 || fallback_resolution <= 0 || roh_threshold < 0) {
   stop("Invalid parameter values", call. = FALSE)
@@ -392,8 +469,8 @@ if (identical(mode, "single")) {
   non_roh_bridged <- calc_non_roh_stats(flags, "roh_bridged")
   seg_raw <- calc_roh_segments(flags, "roh_raw")
   seg_br <- calc_roh_segments(flags, "roh_bridged")
-  froh_raw <- calc_froh_bins(seg_raw, genome_bp)
-  froh_br <- calc_froh_bins(seg_br, genome_bp)
+  froh_raw <- calc_froh_bins(seg_raw, genome_bp, froh_cutoffs)
+  froh_br <- calc_froh_bins(seg_br, genome_bp, froh_cutoffs)
 
   built <- build_single_plot_df(df, min_length_mb, max_scaffolds, bin_size_bp, roh_threshold_used)
   plotted_df <- df %>% filter(chrom %in% unique(as.character(built$plot_df$chrom)))
@@ -427,9 +504,9 @@ if (identical(mode, "single")) {
   cat(sprintf("Genome size used for FROH: %.0f bp (n_windows=%d x %d bp)\n", genome_bp, nrow(df), WINDOW_BP_FOR_FROH))
 
   cat("\nFROH (unbridged/raw; ROH segments longer than cutoff)\n")
-  for (i in seq_len(nrow(froh_raw))) cat(sprintf("  >%s: %.6f (ROH bp=%.0f)\n", sub("gt", "", froh_raw$metric[i]), froh_raw$froh[i], froh_raw$roh_bp[i]))
+  for (i in seq_len(nrow(froh_raw))) cat(sprintf("  >%s: %.6f (ROH bp=%.0f)\n", froh_raw$cutoff_label[i], froh_raw$froh[i], froh_raw$roh_bp[i]))
   cat("FROH (bridged; ROH segments longer than cutoff)\n")
-  for (i in seq_len(nrow(froh_br))) cat(sprintf("  >%s: %.6f (ROH bp=%.0f)\n", sub("gt", "", froh_br$metric[i]), froh_br$froh[i], froh_br$roh_bp[i]))
+  for (i in seq_len(nrow(froh_br))) cat(sprintf("  >%s: %.6f (ROH bp=%.0f)\n", froh_br$cutoff_label[i], froh_br$froh[i], froh_br$roh_bp[i]))
 
 } else {
   sample_list <- get_opt("sample-list", required = TRUE)
@@ -468,20 +545,15 @@ if (identical(mode, "single")) {
     non_roh_bridged <- calc_non_roh_stats(flags, "roh_bridged")
     seg_raw <- calc_roh_segments(flags, "roh_raw")
     seg_br <- calc_roh_segments(flags, "roh_bridged")
-    froh_raw <- calc_froh_bins(seg_raw, genome_bp)
-    froh_br <- calc_froh_bins(seg_br, genome_bp)
-
-    raw_map <- setNames(froh_raw$froh, froh_raw$metric)
-    raw_bp_map <- setNames(froh_raw$roh_bp, froh_raw$metric)
-    br_map <- setNames(froh_br$froh, froh_br$metric)
-    br_bp_map <- setNames(froh_br$roh_bp, froh_br$metric)
+    froh_raw <- calc_froh_bins(seg_raw, genome_bp, froh_cutoffs)
+    froh_br <- calc_froh_bins(seg_br, genome_bp, froh_cutoffs)
 
     built <- build_batch_plot_df(df, sid, min_length_mb, max_scaffolds, bin_size_bp, roh_threshold_used)
     plotted_df <- df %>% filter(chrom %in% unique(built$plot_df$chrom))
     het_stats_plotted <- if (nrow(plotted_df) > 0) calc_het_stats(plotted_df) else tibble(mean_het = NA_real_, median_het = NA_real_)
     if (nrow(built$plot_df) > 0) plot_rows[[length(plot_rows) + 1]] <- built$plot_df
 
-    summary_rows[[length(summary_rows) + 1]] <- tibble(
+    summary_base <- tibble(
       sample = sid,
       roh_file = path,
       dataset_type = dataset_type,
@@ -501,24 +573,19 @@ if (identical(mode, "single")) {
       roh_threshold_input = roh_threshold,
       roh_threshold = roh_threshold_used,
       n_raw_segments = nrow(seg_raw),
-      n_bridged_segments = nrow(seg_br),
-      raw_froh_gt100kb = raw_map[["gt100kb"]],
-      raw_froh_gt1Mb = raw_map[["gt1Mb"]],
-      raw_froh_gt5Mb = raw_map[["gt5Mb"]],
-      raw_roh_bp_gt100kb = raw_bp_map[["gt100kb"]],
-      raw_roh_bp_gt1Mb = raw_bp_map[["gt1Mb"]],
-      raw_roh_bp_gt5Mb = raw_bp_map[["gt5Mb"]],
-      bridged_froh_gt100kb = br_map[["gt100kb"]],
-      bridged_froh_gt1Mb = br_map[["gt1Mb"]],
-      bridged_froh_gt5Mb = br_map[["gt5Mb"]],
-      bridged_roh_bp_gt100kb = br_bp_map[["gt100kb"]],
-      bridged_roh_bp_gt1Mb = br_bp_map[["gt1Mb"]],
-      bridged_roh_bp_gt5Mb = br_bp_map[["gt5Mb"]],
+      n_bridged_segments = nrow(seg_br)
+    )
+    summary_plot <- tibble(
       scaffolds_plotted = built$n_chrom,
       rows_used_for_plot = built$rows_used,
       mean_heterozygosity_plotted_windows = het_stats_plotted$mean_het,
       median_heterozygosity_plotted_windows = het_stats_plotted$median_het,
       bin_size_bp_used = built$bin_size
+    )
+    summary_rows[[length(summary_rows) + 1]] <- bind_cols(
+      summary_base,
+      build_froh_summary_columns(froh_raw, froh_br),
+      summary_plot
     )
   }
 
@@ -537,6 +604,7 @@ if (identical(mode, "single")) {
   cat(sprintf("Total plotted scaffold panels: %d\n", sample_counts))
   cat(sprintf("ROH threshold mode: %s\n", roh_threshold_mode))
   cat(sprintf("ROH threshold input: %.6f\n", roh_threshold))
+  cat(sprintf("FROH segment cutoffs: %s\n", paste(froh_cutoffs$cutoff_label, collapse = ", ")))
   if (roh_threshold_mode != "absolute") {
     cat("ROH threshold used: sample-specific values written to the summary table\n")
   }
