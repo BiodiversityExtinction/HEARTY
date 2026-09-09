@@ -23,7 +23,8 @@ usage <- paste(
   "  --bin-size-bp 500000",
   "  --fallback-resolution 100",
   "  --roh-threshold 0.0001",
-  "  --roh-threshold-mode absolute",
+  "  --roh-threshold-mode <absolute|median> [default: absolute]",
+  "    median: --roh-threshold x each sample's median window heterozygosity",
   "  --froh-cutoffs 100kb,1mb,5mb",
   "",
   "Single-mode required:",
@@ -272,11 +273,10 @@ resolve_roh_threshold <- function(df, threshold_value, threshold_mode) {
   if (threshold_mode == "absolute") {
     return(threshold_value)
   }
-  basis <- if (threshold_mode == "mean") {
-    mean(df$prop, na.rm = TRUE)
-  } else {
-    median(df$prop, na.rm = TRUE)
+  if (threshold_mode != "median") {
+    stop("--roh-threshold-mode must be one of: absolute, median", call. = FALSE)
   }
+  basis <- median(df$prop, na.rm = TRUE)
   if (!is.finite(basis)) {
     stop(sprintf("Could not calculate %s heterozygosity for relative ROH threshold", threshold_mode), call. = FALSE)
   }
@@ -445,8 +445,8 @@ froh_cutoffs <- parse_froh_cutoffs(get_opt("froh-cutoffs", "100kb,1mb,5mb"))
 if (min_length_mb <= 0 || max_scaffolds <= 0 || fill_cap_scale <= 0 || bin_size_bp <= 0 || fallback_resolution <= 0 || roh_threshold < 0) {
   stop("Invalid parameter values", call. = FALSE)
 }
-if (!roh_threshold_mode %in% c("absolute", "mean", "median")) {
-  stop("--roh-threshold-mode must be one of: absolute, mean, median", call. = FALSE)
+if (!roh_threshold_mode %in% c("absolute", "median")) {
+  stop("--roh-threshold-mode must be one of: absolute, median", call. = FALSE)
 }
 
 WINDOW_BP_FOR_FROH <- 100000

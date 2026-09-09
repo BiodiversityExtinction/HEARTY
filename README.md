@@ -450,9 +450,9 @@ The batch summary TSV now includes:
 - `roh_threshold`
   Effective ROH cutoff used for raw ROH calling in the summary. In relative modes, this is sample-specific.
 - `roh_threshold_mode`
-  How the ROH cutoff was interpreted: `absolute`, `mean`, or `median`.
+  How the ROH cutoff was interpreted: `absolute` or `median`.
 - `roh_threshold_input`
-  The value supplied to `--roh-threshold`. In relative modes this is multiplied by the sample mean or median window heterozygosity.
+  The value supplied to `--roh-threshold`. In `median` mode this is multiplied by the sample's median window heterozygosity.
 - `n_raw_segments`
   Number of raw ROH segments before bridging.
 - `n_bridged_segments`
@@ -484,7 +484,7 @@ Non-ROH heterozygosity is calculated from the original 100 kb windows before plo
 - Window fill color:
   Lower heterozygosity windows are shown toward the low end of the color scale and higher heterozygosity windows toward the high end.
 - Black ticks:
-  Windows whose heterozygosity proportion is less than or equal to the effective ROH threshold. In `absolute` mode this is `--roh-threshold`; in `mean` or `median` mode it is the requested proportion of that sample's mean or median window heterozygosity.
+  Windows whose heterozygosity proportion is less than or equal to the effective ROH threshold. In `absolute` mode this is `--roh-threshold`; in `median` mode it is the requested proportion of that sample's median window heterozygosity.
 - Orange ticks:
   “Bridged” ROH calls, where a single non-ROH window between two ROH windows is filled in to create a more continuous segment.
 
@@ -497,11 +497,11 @@ This gives you two related views:
 - `--roh-threshold`
   The value used to mark a window as ROH-like. Lower values are stricter. How this value is interpreted depends on `--roh-threshold-mode`.
 - `--roh-threshold-mode`
-  Controls whether `--roh-threshold` is an absolute heterozygosity cutoff or a relative cutoff based on each sample.
+  Accepts `absolute` (default) or `median`, selecting an absolute heterozygosity cutoff or a relative cutoff based on each sample.
   `absolute` means a window is ROH-like if its heterozygosity is less than or equal to `--roh-threshold`.
-  `mean` means the effective cutoff is `--roh-threshold * mean window heterozygosity`.
   `median` means the effective cutoff is `--roh-threshold * median window heterozygosity`.
-  For example, `--roh-threshold 0.2 --roh-threshold-mode mean` calls windows ROH-like if they are below 20% of that sample's mean window heterozygosity.
+  For example, `--roh-threshold 0.2 --roh-threshold-mode median` calls windows ROH-like if they are at or below 20% of that sample's median window heterozygosity. The median is calculated over all parsed input windows before ROH classification and independently for each sample in batch mode, not just the windows retained for plotting. If the median is zero, the effective cutoff is zero and only zero-heterozygosity windows are classified as ROH-like.
+  Mean-based ROH thresholds are no longer supported; mean heterozygosity summaries and the mean-based `--fill-cap auto` visualization option are unchanged.
 - `--froh-cutoffs`
   Comma-separated ROH segment-length cutoffs used for FROH reporting. Values may use `bp`, `kb`, `mb`, or `gb`; values without a unit are interpreted as base pairs. The default is `100kb,1mb,5mb`. For example, `--froh-cutoffs "100kb,500kb,2mb,10mb"` reports FROH and ROH base pairs for all four requested length classes.
 - `--fill-cap`
@@ -557,8 +557,6 @@ In single-sample mode the script also prints:
 - For a visualization-driven adaptive scale, try:
   `--fill-cap auto --fill-cap-scale 0.8`
 - For a sample-aware ROH cutoff, try:
-  `--roh-threshold 0.2 --roh-threshold-mode mean`
-  or
   `--roh-threshold 0.2 --roh-threshold-mode median`
 - If the PDF is too large:
   increase `--bin-size-bp` such as `1000000`
