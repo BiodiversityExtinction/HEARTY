@@ -113,6 +113,23 @@ class ReferenceTests(unittest.TestCase):
             self.build(reference_path=self.ref)
         self.assertEqual(self.out.read_bytes(), before)
 
+    def test_custom_quality_filters_replace_defaults(self):
+        bam = self.root / "sample.bam"
+        bam.touch()
+        result = self.cli(
+            "-b", bam,
+            "-o", "quality_override",
+            "-d", self.root,
+            "--angsd", shutil.which("true"),
+            "--angsd-params", "-minq 25 -minmapq 30",
+            "--dry-run",
+        )
+        command = next(line for line in result.stdout.splitlines() if line.startswith("Running:"))
+        self.assertEqual(command.count("-minq"), 1)
+        self.assertEqual(command.count("-minmapq"), 1)
+        self.assertIn("-minq 25", command)
+        self.assertIn("-minmapq 30", command)
+
 
 if __name__ == "__main__":
     unittest.main()

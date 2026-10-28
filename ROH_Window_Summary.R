@@ -1,10 +1,5 @@
 #!/usr/bin/env Rscript
 
-suppressPackageStartupMessages({
-  library(tidyverse)
-  library(ggplot2)
-})
-
 args <- commandArgs(trailingOnly = TRUE)
 
 usage <- paste(
@@ -12,7 +7,7 @@ usage <- paste(
   "  Rscript ROH_Window_Summary.R --mode <single|batch> [options]",
   "",
   "Modes:",
-  "  single: one window-summary txt -> one PDF",
+  "  single: one window-summary txt -> one PDF + text report",
   "  batch : sample list -> summary TSV + combined PDF",
   "",
   "Common options:",
@@ -30,6 +25,8 @@ usage <- paste(
   "Single-mode required:",
   "  --input <path/to/sample.windows.txt.gz>",
   "  --output-pdf <path/to/output.pdf>",
+  "  Optional: --summary-out <path/to/report.txt>",
+  "    Default: <output-pdf without .pdf>_summary.txt (same report as the terminal)",
   "",
   "Batch-mode required:",
   "  --sample-list <path/to/sample_list.tsv>",
@@ -58,6 +55,11 @@ if (length(args) == 0 || any(args %in% c("-h", "--help"))) {
   quit(status = 0)
 }
 
+suppressPackageStartupMessages({
+  library(tidyverse)
+  library(ggplot2)
+})
+
 opt <- parse_named_args(args)
 get_opt <- function(name, default = NULL, required = FALSE) {
   if (!is.null(opt[[name]])) return(opt[[name]])
@@ -74,6 +76,17 @@ as_int <- function(x, nm) {
   v <- suppressWarnings(as.integer(x))
   if (!is.finite(v)) stop(sprintf("--%s must be integer", nm), call. = FALSE)
   v
+}
+
+default_single_summary_path <- function(out_pdf) {
+  paste0(sub("\\.pdf$", "", out_pdf, ignore.case = TRUE), "_summary.txt")
+}
+
+write_single_summary <- function(lines, path) {
+  dir.create(dirname(path), recursive = TRUE, showWarnings = FALSE)
+  writeLines(lines, path)
+  cat(paste(lines, collapse = "\n"), "\n", sep = "")
+  cat(sprintf("Wrote summary report: %s\n", path))
 }
 
 parse_roh_txt <- function(path) {
@@ -454,6 +467,11 @@ WINDOW_BP_FOR_FROH <- 100000
 if (identical(mode, "single")) {
   input <- get_opt("input", required = TRUE)
   out_pdf <- get_opt("output-pdf", required = TRUE)
+  summary_out <- get_opt("summary-out", default_single_summary_path(out_pdf))
+  if (normalizePath(summary_out, mustWork = FALSE) %in%
+      normalizePath(c(input, out_pdf), mustWork = FALSE)) {
+    stop("--summary-out must differ from --input and --output-pdf", call. = FALSE)
+  }
   sample_label <- basename(input)
 
   df <- parse_roh_txt(input)
@@ -478,35 +496,44 @@ if (identical(mode, "single")) {
   dir.create(dirname(out_pdf), recursive = TRUE, showWarnings = FALSE)
   plot_single(built$plot_df, sprintf("%s [%s]", sample_label, dataset_type), fill_cap, roh_caption, fallback_resolution, out_pdf)
 
-  cat(sprintf("Wrote PDF: %s\n", out_pdf))
-  cat(sprintf("Dataset type: %s\n", dataset_type))
-  cat(sprintf("HET label parsed: %s\n", paste(unique(df$het_label), collapse = ", ")))
-  cat(sprintf("Input rows parsed: %d\n", nrow(df)))
-  cat(sprintf("Mean heterozygosity (all parsed windows): %.7f\n", het_stats_all$mean_het))
-  cat(sprintf("Median heterozygosity (all parsed windows): %.7f\n", het_stats_all$median_het))
-  cat(sprintf("Rows used for plotted scaffolds: %d\n", built$rows_used))
-  cat(sprintf("Mean heterozygosity (plotted scaffolds): %.7f\n", het_stats_plotted$mean_het))
-  cat(sprintf("Median heterozygosity (plotted scaffolds): %.7f\n", het_stats_plotted$median_het))
-  cat(sprintf("Scaffolds plotted: %d (min length %.2f Mb; max panels %d)\n", built$scaffolds_plotted, min_length_mb, max_scaffolds))
-  cat(sprintf("Bin size used: %.0f bp\n", built$bin_size))
-  cat(sprintf("PDF fallback resolution: %d dpi\n", fallback_resolution))
-  cat(sprintf("ROH threshold mode: %s\n", roh_threshold_mode))
-  cat(sprintf("ROH threshold input: %.6f\n", roh_threshold))
-  cat(sprintf("ROH threshold used: %.6f\n", roh_threshold_used))
-  cat(sprintf("Non-ROH windows (raw definition): %d\n", non_roh_raw$n_windows))
-  cat(sprintf("Mean heterozygosity (non-ROH, raw definition): %.7f\n", non_roh_raw$mean_het))
-  cat(sprintf("Median heterozygosity (non-ROH, raw definition): %.7f\n", non_roh_raw$median_het))
-  cat(sprintf("Non-ROH windows (bridged definition): %d\n", non_roh_bridged$n_windows))
-  cat(sprintf("Mean heterozygosity (non-ROH, bridged definition): %.7f\n", non_roh_bridged$mean_het))
-  cat(sprintf("Median heterozygosity (non-ROH, bridged definition): %.7f\n", non_roh_bridged$median_het))
-  cat(sprintf("Raw ROH bins flagged: %d\n", sum(built$plot_df$roh_hit_raw, na.rm = TRUE)))
-  cat(sprintf("Bridged ROH bins flagged: %d\n", sum(built$plot_df$roh_hit_bridged, na.rm = TRUE)))
-  cat(sprintf("Genome size used for FROH: %.0f bp (n_windows=%d x %d bp)\n", genome_bp, nrow(df), WINDOW_BP_FOR_FROH))
+  summary_lines <- capture.output({
+    cat(sprintf("Sample: %s\n", sample_label))
+    cat(sprintf("Input file: %s\n", input))
+    cat(sprintf("Wrote PDF: %s\n", out_pdf))
+    cat(sprintf("Dataset type: %s\n", dataset_type))
+    cat(sprintf("HET label parsed: %s\n", paste(unique(df$het_label), collapse = ", ")))
+    cat(sprintf("Input rows parsed: %d\n", nrow(df)))
+    cat(sprintf("Mean heterozygosity (all parsed windows): %.7f\n", het_stats_all$mean_het))
+    cat(sprintf("Median heterozygosity (all parsed windows): %.7f\n", het_stats_all$median_het))
+    cat(sprintf("Rows used for plotted scaffolds: %d\n", built$rows_used))
+    cat(sprintf("Mean heterozygosity (plotted scaffolds): %.7f\n", het_stats_plotted$mean_het))
+    cat(sprintf("Median heterozygosity (plotted scaffolds): %.7f\n", het_stats_plotted$median_het))
+    cat(sprintf("Scaffolds plotted: %d (min length %.2f Mb; max panels %d)\n", built$scaffolds_plotted, min_length_mb, max_scaffolds))
+    cat(sprintf("Bin size used: %.0f bp\n", built$bin_size))
+    cat(sprintf("PDF fallback resolution: %d dpi\n", fallback_resolution))
+    cat(sprintf("ROH threshold mode: %s\n", roh_threshold_mode))
+    cat(sprintf("ROH threshold input: %.6f\n", roh_threshold))
+    cat(sprintf("ROH threshold used: %.6f\n", roh_threshold_used))
+    cat(sprintf("Non-ROH windows (raw definition): %d\n", non_roh_raw$n_windows))
+    cat(sprintf("Mean heterozygosity (non-ROH, raw definition): %.7f\n", non_roh_raw$mean_het))
+    cat(sprintf("Median heterozygosity (non-ROH, raw definition): %.7f\n", non_roh_raw$median_het))
+    cat(sprintf("Non-ROH windows (bridged definition): %d\n", non_roh_bridged$n_windows))
+    cat(sprintf("Mean heterozygosity (non-ROH, bridged definition): %.7f\n", non_roh_bridged$mean_het))
+    cat(sprintf("Median heterozygosity (non-ROH, bridged definition): %.7f\n", non_roh_bridged$median_het))
+    cat(sprintf("Raw ROH bins flagged: %d\n", sum(built$plot_df$roh_hit_raw, na.rm = TRUE)))
+    cat(sprintf("Bridged ROH bins flagged: %d\n", sum(built$plot_df$roh_hit_bridged, na.rm = TRUE)))
+    cat(sprintf("Genome size used for FROH: %.0f bp (n_windows=%d x %d bp)\n", genome_bp, nrow(df), WINDOW_BP_FOR_FROH))
 
-  cat("\nFROH (unbridged/raw; ROH segments longer than cutoff)\n")
-  for (i in seq_len(nrow(froh_raw))) cat(sprintf("  >%s: %.6f (ROH bp=%.0f)\n", froh_raw$cutoff_label[i], froh_raw$froh[i], froh_raw$roh_bp[i]))
-  cat("FROH (bridged; ROH segments longer than cutoff)\n")
-  for (i in seq_len(nrow(froh_br))) cat(sprintf("  >%s: %.6f (ROH bp=%.0f)\n", froh_br$cutoff_label[i], froh_br$froh[i], froh_br$roh_bp[i]))
+    cat("\nFROH (unbridged/raw; ROH segments longer than cutoff)\n")
+    for (i in seq_len(nrow(froh_raw))) cat(sprintf("  >%s: %.6f (ROH bp=%.0f)\n", froh_raw$cutoff_label[i], froh_raw$froh[i], froh_raw$roh_bp[i]))
+    cat("FROH (bridged; ROH segments longer than cutoff)\n")
+    for (i in seq_len(nrow(froh_br))) cat(sprintf("  >%s: %.6f (ROH bp=%.0f)\n", froh_br$cutoff_label[i], froh_br$froh[i], froh_br$roh_bp[i]))
+  })
+  if (normalizePath(summary_out, mustWork = FALSE) %in%
+      normalizePath(c(input, out_pdf), mustWork = FALSE)) {
+    stop("--summary-out must differ from --input and --output-pdf", call. = FALSE)
+  }
+  write_single_summary(summary_lines, summary_out)
 
 } else {
   sample_list <- get_opt("sample-list", required = TRUE)

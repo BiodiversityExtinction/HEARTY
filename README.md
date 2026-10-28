@@ -112,6 +112,9 @@ Optional arguments:
   --downsample-depth INT     Downsample each site to this depth for downstream summaries
   --downsample-reps INT      Number of downsampling replicates [default: 10]
   --downsample-seed INT      Seed used to make per-site downsampling deterministic [default: 1]
+  --downstream-workers INT   Worker processes for single-pass summaries [default: 1]
+  --downstream-chunk-size INT Input rows per worker task [default: 10000]
+  --progress-interval FLOAT  Seconds between progress reports; 0 disables [default: 30]
   -c, --cores INT            Number of ANGSD/compression threads [default: 8]
   --angsd PATH               ANGSD executable [default: auto]
   --ref FILE                Reference FASTA with .fai index; add Ref to the basecall table
@@ -142,6 +145,36 @@ The source table is never rewritten, even with `--force`. Plain `.txt` and gzip-
 Existing threshold-specific calls are reused. When a requested threshold is absent, HEARTY calculates its calls from `count_A`, `count_C`, `count_G`, and `count_T` during summarization without adding columns to the source file. Older tables without counts must already contain the requested `Base_<threshold>` and `Status_<threshold>` columns, including `0.05` for minor-frequency output. Downsampling always requires raw counts.
 
 The usual `--min-depth`, `--max-depth`, and downsampling options apply. `--reuse-existing` is unnecessary to select this input mode; existing downstream outputs require `--force` or `--reuse-existing` to refresh them. `--dry-run` validates the input header and previews summaries without changing files. Region and custom ANGSD settings cannot be applied to this input mode: regenerate the original counts if those filters need changing.
+
+### Single-pass downstream processing and parallelism
+
+Minor-frequency and all requested window summaries are generated together in **one full scan** of the basecall table. Each passing site is downsampled once (including all requested replicates), its mean allele frequencies are calculated once, and those frequencies are reused for the internal `0.05` threshold and every requested `-t` threshold. Both all-sites and transversion-only window counts are updated together. No per-threshold or per-replicate file scans are performed.
+
+For example, reuse an existing whole-genome basecall table with 15-read downsampling, 10 replicates, and two window thresholds:
+
+```bash
+python3 HEARTY.py \
+  --basecall-file /path/to/sample.basecall.txt.gz \
+  -o sample_ds15 -d results/downsampled \
+  -m 15 -M 80 \
+  -t 0.25 -t 0.30 \
+  --downsample-depth 15 --downsample-reps 10 --downsample-seed 1 \
+  --downstream-workers 8 \
+  --downstream-chunk-size 10000 \
+  --progress-interval 30 \
+  -c 2
+```
+
+Use your original depth filters and seed when comparing against previous results. Neither ANGSD nor basecall generation runs in this input mode, and the input table stays unchanged. Use a new output directory/prefix for comparisons; add `--force` only when you intend to replace existing summaries.
+
+- `--downstream-workers` controls **processes**, not threads. The default is `1`, which still uses the optimized single-pass implementation. With multiple workers, substantial chunks of sites are processed independently; each worker returns aggregated minor-frequency and window counts, not per-site results. There is no thread or process per replicate.
+- `--downstream-chunk-size` is the number of input rows in each task (default `10000`); rows failing filters are removed before submission. Larger chunks reduce scheduling overhead but use more memory and delay progress updates, especially with one worker. Smaller chunks can improve load balancing. At most twice the worker count is submitted at once, so the entire genome is never queued in memory. Memory is used for these bounded chunks and accumulated window-level counts, not all sites.
+- `--progress-interval` sets the reporting interval in seconds (default `30`); `0` disables progress. Reports go to stderr and show completed input rows, passing sites, approximate input-byte percentage, elapsed time, processing rate, and estimated time remaining. For `.gz` input, the byte position refers to the compressed file. Read-ahead, variable compression, and uneven site costs make percentage and ETA approximate, especially early in a run. Counts advance as chunks are merged; single-worker reports occur between chunks. Completion is reported only after outputs have been written.
+- `-c`/`--cores` continues to control ANGSD/compression threads, **not** downstream worker processes. Request enough CPUs from your scheduler for the workers plus the parent reader and compression processes; avoid assigning all allocated CPUs to both settings. Samples in a BAM list are still processed sequentially, with the chosen worker count per sample.
+
+The coordinate-derived RNG seed and downsampling algorithm are unchanged, so worker count, chunk size, and scheduling do not alter the sampled frequencies. Output naming, frequency binning, coverage rules, window boundaries, and all-sites/transversion counting retain the previous behavior. Without downsampling, existing call columns and their stored frequencies are still respected; missing thresholds are calculated from raw counts. Summary files are staged after successful computation before replacing their targets.
+
+Regression tests compare the new summaries against the previous serial routines, including scaffold changes, coordinate gaps, chunk boundaries, and different worker counts. Run them with `python3 -m unittest discover -s tests -v`.
 
 ### BAM list format
 
@@ -187,7 +220,7 @@ python3 HEARTY.py \
   --angsd-params "-minmapq 30 -baq 1"
 ```
 
-The value must be quoted as one string. HEARTY appends these options to the ANGSD command after its defaults, so the final command is visible with `--dry-run`.
+The value must be quoted as one string. HEARTY appends these options to the ANGSD command after its defaults, so the final command is visible with `--dry-run`. Explicit `-minq` and `-minmapq` values replace HEARTY's defaults rather than being passed twice.
 
 This option is intended for ANGSD filtering and model settings such as mapping-quality, base-alignment-quality, or BAQ-related choices. HEARTY still manages the required counting/output options, including `-i`, `-out`, `-docounts`, `-dumpCounts`, and `-nThreads`.
 
@@ -243,7 +276,7 @@ When `--downsample-depth` is provided, HEARTY keeps the basecall table unchanged
 
 Per-site logic:
 - the site must first pass the normal `--min-depth` / `--max-depth` filters
-- the site must also have `totDepth >= --downsample-depth`
+- the sum of its raw A/C/G/T counts must also be at least `--downsample-depth`
 - the observed nucleotide counts are downsampled without replacement to the requested depth
 - this is repeated `--downsample-reps` times
 - mean allele frequencies across replicates are calculated
@@ -364,12 +397,20 @@ Rscript ROH_Window_Summary.R \
   --froh-cutoffs "100kb,1mb,5mb"
 ```
 
-Single-sample mode writes one PDF for one sample and prints summary statistics to the terminal, including:
+Single-sample mode writes one PDF and automatically saves the full terminal report as a plain-text file beside it. For example, `results/plots/sample01_roh.pdf` produces `results/plots/sample01_roh_summary.txt`. The results are still printed to the terminal, including:
 - number of windows parsed
 - number of scaffolds plotted
 - mean and median heterozygosity across all windows and across non-ROH windows
 - raw and bridged ROH bin counts
 - FROH values for segments longer than the requested cutoffs, by default 100 kb, 1 Mb, and 5 Mb
+
+The report also records the input filename, dataset type (all-sites or transversion-only), effective ROH threshold, plotting settings, and genome-size denominator used for FROH. To choose a different report filename, add:
+
+```bash
+--summary-out results/summaries/sample01_roh.txt
+```
+
+In single mode this is a human-readable report containing the same statistics as the terminal, not a TSV. Batch mode continues to write its existing multi-sample TSV using `--summary-out`. A subsequent single run with the same report filename replaces the previous report, so use distinct filenames for parameter comparisons. The report path must differ from both the input file and the PDF output.
 
 ### Batch usage
 
@@ -476,6 +517,7 @@ Non-ROH heterozygosity is calculated from the original 100 kb windows before plo
   Must be either `single` or `batch`.
 - Single mode:
   Requires `--input` for one window-summary file and `--output-pdf` for one output PDF.
+  Optionally use `--summary-out` to set the text report path; otherwise `<output-pdf without .pdf>_summary.txt` is written automatically.
 - Batch mode:
   Requires `--sample-list`, `--summary-out`, and `--combined-pdf`.
 

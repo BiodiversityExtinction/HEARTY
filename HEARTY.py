@@ -2,7 +2,9 @@
 
 import argparse
 import hashlib
+import io
 import mmap
+import multiprocessing
 import os
 import random
 import shlex
@@ -10,7 +12,11 @@ import shutil
 import subprocess
 import sys
 import tempfile
-from contextlib import ExitStack, closing
+import time
+import math
+from collections import Counter, deque
+from concurrent.futures import ProcessPoolExecutor, TimeoutError as FutureTimeout
+from contextlib import ExitStack, closing, contextmanager
 from itertools import zip_longest
 from pathlib import Path
 
@@ -43,6 +49,9 @@ OPTIONAL ARGUMENTS:
     --downsample-depth INT     Downsample each site to this depth for downstream summaries
     --downsample-reps INT      Number of downsampling replicates [default: 10]
     --downsample-seed INT      Seed used to make per-site downsampling deterministic [default: 1]
+    --downstream-workers INT   Worker processes for single-pass summaries [default: 1]
+    --downstream-chunk-size INT Input rows per worker task [default: 10000]
+    --progress-interval FLOAT  Seconds between progress reports; 0 disables [default: 30]
     -c, --cores INT            Number of ANGSD/compression threads [default: 8]
     --angsd PATH               ANGSD executable [default: auto]
     --angsd-params STR         Extra ANGSD parameters, quoted as one string
@@ -173,6 +182,15 @@ def parse_angsd_params(raw_params):
     except ValueError as exc:
         print(f"Error: Could not parse --angsd-params: {exc}", file=sys.stderr)
         sys.exit(1)
+
+
+def has_angsd_option(params, option):
+    """Return True when an ANGSD option is already supplied explicitly."""
+    option = option.lower()
+    return any(
+        token.lower() == option or token.lower().startswith(f"{option}=")
+        for token in params
+    )
 
 
 def normalize_angsd_params_arg(argv):
@@ -650,6 +668,7 @@ def depth_passes(fields, depth_idx, min_depth, max_depth):
     return True
 
 
+# Serial reference routines retained for regression comparisons; the CLI uses run_downstream.
 def minorfreq_from_basecall(
     basecall_gz,
     threshold,
@@ -904,12 +923,12 @@ def run_single_bam(bam_path, prefix, args):
     if not args.dry_run:
         outputs["outdir"].mkdir(parents=True, exist_ok=True)
 
-    angsd_cmd = [
-        angsd,
-        "-minq",
-        "20",
-        "-minmapq",
-        "20",
+    angsd_cmd = [angsd]
+    if not has_angsd_option(extra_angsd_params, "-minq"):
+        angsd_cmd.extend(["-minq", "20"])
+    if not has_angsd_option(extra_angsd_params, "-minmapq"):
+        angsd_cmd.extend(["-minmapq", "20"])
+    angsd_cmd.extend([
         "-uniqueOnly",
         "1",
         "-remove_bads",
@@ -924,7 +943,7 @@ def run_single_bam(bam_path, prefix, args):
         str(outputs["outdir"] / prefix),
         "-nThreads",
         str(max(1, min(args.cores, 64))),
-    ]
+    ])
     if rf:
         angsd_cmd.extend(["-rf", rf])
     elif reg:
@@ -1035,49 +1054,226 @@ def run_from_basecall(prefix, args):
     return run_downstream(prefix, outputs, args, compression, basecall_input=True)
 
 
+@contextmanager
+def downstream_input(path, compression):
+    """Expose input-byte position without scanning the file to count its rows."""
+    with Path(path).open("rb", buffering=0) as raw:
+        if Path(path).suffix != ".gz":
+            with io.TextIOWrapper(raw) as lines:
+                yield lines, raw
+            return
+        proc = subprocess.Popen(compression["decompress_cmd"], stdin=raw,
+                                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        try:
+            yield proc.stdout, raw
+            stderr = proc.stderr.read()
+            if proc.wait() != 0:
+                raise subprocess.CalledProcessError(proc.returncode, compression["decompress_cmd"], stderr=stderr)
+        finally:
+            proc.stdout.close()
+            if proc.poll() is None:
+                proc.terminate()
+            proc.wait()
+            proc.stderr.close()
+
+
+class DownstreamProgress:
+    def __init__(self, path, interval):
+        self.size = Path(path).stat().st_size
+        self.interval = interval
+        self.started = self.last_report = time.monotonic()
+        self.rows = self.passing = self.position = 0
+
+    def report(self, force=False, done=False):
+        now = time.monotonic()
+        if not self.interval or (not force and now - self.last_report < self.interval):
+            return
+        self.last_report = now
+        elapsed = now - self.started
+        fraction = min(self.position / max(1, self.size), 0.999) if not done else 1.0
+        eta = elapsed * (1 - fraction) / fraction if fraction else None
+        remaining = f"{eta / 3600:.2f}h" if eta is not None else "unknown"
+        print(f"Downstream: {self.rows:,} rows processed; {self.passing:,} passing sites; "
+              f"input ~{100 * fraction:.1f}%; elapsed {elapsed / 3600:.2f}h; "
+              f"ETA ~{remaining}; {self.rows / max(elapsed, 0.001):,.0f} rows/s"
+              f"{' (complete)' if done else ''}", file=sys.stderr, flush=True)
+
+
+def downstream_chunks(lines, raw, header, args, layout, have_windows):
+    """Assign legacy window boundaries in input order before dispatching work."""
+    records = []
+    rows = 0
+    current = None
+    count_indices = [header[count_col(b)] for b in "ACGT"] if args.downsample_depth else None
+    for line in lines:
+        rows += 1
+        fields = line.rstrip("\n").split("\t")
+        if depth_passes(fields, header.get("totDepth"), args.min_depth, args.max_depth):
+            try:
+                chrom, site = fields[0], int(fields[1])
+            except (IndexError, ValueError):
+                chrom, site = None, None
+            counts = None
+            eligible = True
+            if count_indices is not None:
+                try:
+                    counts = [int(fields[i]) for i in count_indices]
+                    eligible = site is not None and sum(counts) >= args.downsample_depth
+                except (IndexError, ValueError):
+                    eligible = False
+            if eligible:
+                window = -1
+                if have_windows and site is not None:
+                    # Match the serial reset/no-flush and one-step gap behavior exactly.
+                    if current is None or layout[current][0] != chrom:
+                        if current is not None:
+                            layout[current][2] = "discard"
+                        layout.append([chrom, 0, "open"])
+                        current = len(layout) - 1
+                    if site > layout[current][1] + WINDOW_SIZE_BP - 1:
+                        layout[current][2] = "normal"
+                        layout.append([chrom, layout[current][1] + WINDOW_SIZE_BP, "open"])
+                        current = len(layout) - 1
+                    window = current
+                records.append((window, chrom, site, counts) if count_indices is not None else (window, fields))
+        if rows >= args.downstream_chunk_size:
+            yield records, rows, raw.tell()
+            records, rows = [], 0
+    if current is not None:
+        layout[current][2] = "final"
+    if rows:
+        yield records, rows, raw.tell()
+
+
+def summarize_downstream_chunk(records, config):
+    """Return integer aggregates only; RNG streams depend on coordinates, not tasks."""
+    header, thresholds, depth, reps, seed = config
+    minorfreq = Counter()
+    windows = {}
+    pair_indices = {pair: tuple("ACGT".index(b) for b in pair) for pair in ("AC", "AG", "AT", "CG", "CT", "GT")}
+    stored = [(header.get(threshold_base_col(t)), header.get(threshold_status_col(t))) for t in thresholds]
+    need_counts = not depth and any(b is None or s is None for b, s in stored)
+    for record in records:
+        window = record[0]
+        if depth:
+            _, chrom, site, counts = record
+            freqs = downsample_mean_freqs(counts, chrom, site, depth, reps, seed)
+            calls = [classify_counts_for_threshold(freqs, t) for t in thresholds]
+            minor_freqs = freqs
+        else:
+            fields = record[1]
+            freqs = [float(fields[header[b]]) for b in "ACGT"]
+            count_freqs = counts_to_freqs([int(fields[header[count_col(b)]]) for b in "ACGT"]) if need_counts else None
+            calls = [classify_counts_for_threshold(count_freqs, t) if b is None or s is None
+                     else (fields[b], fields[s]) for t, (b, s) in zip(thresholds, stored)]
+            minor_freqs = count_freqs if stored[0][0] is None or stored[0][1] is None else freqs
+        pair, status = calls[0]
+        if status.startswith("HET") and pair in pair_indices:
+            a, b = pair_indices[pair]
+            minor = min(minor_freqs[a], minor_freqs[b])
+            minorfreq[(f"{minor:.2f}" if minor > 0 else "0", pair)] += 1
+        if window >= 0:
+            totals = windows.setdefault(window, [0] * (1 + 2 * (len(thresholds) - 1)))
+            totals[0] += 1
+            for i, (_, status) in enumerate(calls[1:]):
+                totals[1 + 2 * i] += status.startswith("HET")
+                totals[2 + 2 * i] += status == "HET_trv"
+    return minorfreq, windows, len(records)
+
+
+def write_downstream_aggregates(outputs, thresholds, layout, windows, minorfreq, compression):
+    # Stage all outputs before replacing any existing summaries.
+    with tempfile.TemporaryDirectory(prefix=".hearty-downstream-", dir=outputs["outdir"]) as tmp:
+        staged = []
+        table = Path(tmp) / "minorfreq.txt"
+        pairs = ("AC", "AG", "AT", "CG", "CT", "GT")
+        with table.open("w") as handle:
+            handle.write("freq\tAC\tAG\tAT\tCG\tCT\tGT\ttotal\ttransition\ttransversion\n")
+            for minor in sorted({minor for minor, _ in minorfreq}, key=float):
+                counts = [minorfreq[(minor, pair)] for pair in pairs]
+                total = sum(counts)
+                transition = counts[1] + counts[4]
+                handle.write("\t".join([minor, *map(str, counts), str(total), str(transition), str(total - transition)]) + "\n")
+        staged.append((table, outputs["minorfreq"]["table"]))
+        for i, threshold in enumerate(thresholds[1:]):
+            for kind, offset in (("windows", 1), ("windows_trv", 2)):
+                path = Path(tmp) / f"{i}.{kind}.gz"
+
+                def writer(handle):
+                    for window, (chrom, start, reason) in enumerate(layout):
+                        totals = windows.get(window)
+                        if totals is None or reason == "discard":
+                            continue
+                        count, het = totals[0], totals[2 * i + offset]
+                        if reason != "final" and count < WINDOW_MIN_SITES:
+                            continue
+                        handle.write(f"{chrom} {start}-{start + WINDOW_SIZE_BP - 1}: "
+                                     f"{count} sites, {het} sites with 'HET', Proportion: {het / count:.7f}\n")
+
+                write_compressed_lines(path, compression, writer)
+                staged.append((path, outputs[kind][threshold]))
+        for source, target in staged:
+            source.replace(target)
+
+
 def run_downstream(prefix, outputs, args, compression, basecall_input=False):
-    first_threshold = DEFAULT_THRESHOLD
-    minorfreq_from_basecall(
-        outputs["basecall"],
-        first_threshold,
-        outputs["minorfreq"],
-        args.min_depth,
-        args.max_depth,
-        compression,
-        downsample_depth=args.downsample_depth,
-        downsample_reps=args.downsample_reps,
-        downsample_seed=args.downsample_seed,
-        dry_run=args.dry_run,
-    )
+    thresholds = [DEFAULT_THRESHOLD, *outputs["windows"]]
+    print(f"Running: single-pass downstream summaries for thresholds {thresholds}; "
+          f"workers={args.downstream_workers}, chunk rows={args.downstream_chunk_size}", flush=True)
+    if args.dry_run:
+        print_output_summary(prefix, outputs, basecall_input=basecall_input)
+        return True
+    progress = DownstreamProgress(outputs["basecall"], args.progress_interval)
+    progress.report(force=True)
+    layout, windows, minorfreq = [], {}, Counter()
 
-    for threshold, output_path in outputs["windows"].items():
-        build_window_summary(
-            outputs["basecall"],
-            threshold,
-            output_path,
-            args.min_depth,
-            args.max_depth,
-            compression,
-            downsample_depth=args.downsample_depth,
-            downsample_reps=args.downsample_reps,
-            downsample_seed=args.downsample_seed,
-            dry_run=args.dry_run,
-        )
+    def merge(result, rows, position):
+        minor, partial_windows, passing = result
+        minorfreq.update(minor)
+        for window, totals in partial_windows.items():
+            if window not in windows:
+                windows[window] = totals
+            else:
+                windows[window] = [a + b for a, b in zip(windows[window], totals)]
+        progress.rows += rows
+        progress.passing += passing
+        progress.position = position
+        progress.report()
 
-    for threshold, output_path in outputs["windows_trv"].items():
-        build_window_summary(
-            outputs["basecall"],
-            threshold,
-            output_path,
-            args.min_depth,
-            args.max_depth,
-            compression,
-            transversions_only=True,
-            downsample_depth=args.downsample_depth,
-            downsample_reps=args.downsample_reps,
-            downsample_seed=args.downsample_seed,
-            dry_run=args.dry_run,
-        )
+    with downstream_input(outputs["basecall"], compression) as (lines, raw):
+        header_line = next(lines, None)
+        if header_line is None:
+            raise ValueError(f"Empty basecall file: {outputs['basecall']}")
+        header = {name: i for i, name in enumerate(header_line.rstrip("\n").split("\t"))}
+        config = (header, thresholds, args.downsample_depth, args.downsample_reps, args.downsample_seed)
+        chunks = downstream_chunks(lines, raw, header, args, layout, len(thresholds) > 1)
+        if args.downstream_workers == 1:
+            for records, rows, position in chunks:
+                merge(summarize_downstream_chunk(records, config), rows, position)
+        else:
+            with ProcessPoolExecutor(max_workers=args.downstream_workers,
+                                     mp_context=multiprocessing.get_context("spawn")) as pool:
+                pending = deque()
+
+                def collect():
+                    future, rows, position = pending.popleft()
+                    while True:
+                        try:
+                            result = future.result(timeout=args.progress_interval or None)
+                            break
+                        except FutureTimeout:
+                            progress.report()
+                    merge(result, rows, position)
+
+                # Bounded submission avoids Executor.map's eager whole-genome buffering.
+                for records, rows, position in chunks:
+                    pending.append((pool.submit(summarize_downstream_chunk, records, config), rows, position))
+                    if len(pending) >= 2 * args.downstream_workers:
+                        collect()
+                while pending:
+                    collect()
+    write_downstream_aggregates(outputs, thresholds, layout, windows, minorfreq, compression)
+    progress.report(force=True, done=True)
 
     print_output_summary(prefix, outputs, basecall_input=basecall_input)
     return True
@@ -1114,6 +1310,9 @@ def main():
     optional.add_argument("--downsample-depth", type=int, metavar="INT", help="Downsample each site to this depth for downstream summaries")
     optional.add_argument("--downsample-reps", type=int, default=10, metavar="INT", help="Number of downsampling replicates")
     optional.add_argument("--downsample-seed", type=int, default=1, metavar="INT", help="Seed used to make per-site downsampling deterministic")
+    optional.add_argument("--downstream-workers", type=int, default=1, metavar="INT", help="Processes for single-pass downstream summaries")
+    optional.add_argument("--downstream-chunk-size", type=int, default=10000, metavar="INT", help="Input rows per downstream task")
+    optional.add_argument("--progress-interval", type=float, default=30, metavar="SECONDS", help="Progress report interval; 0 disables reports")
     optional.add_argument("-c", "--cores", type=int, default=8, metavar="INT", help="ANGSD/compression threads")
     optional.add_argument("--angsd", default=DEFAULT_ANGSD, metavar="PATH", help="ANGSD executable")
     optional.add_argument(
@@ -1152,6 +1351,10 @@ def main():
     if (args.bam or args.basecall_file) and not args.out_prefix:
         print("Error: --out-prefix is required with --bam or --basecall-file", file=sys.stderr)
         sys.exit(1)
+    if args.downstream_workers < 1 or args.downstream_chunk_size < 1:
+        parser.error("--downstream-workers and --downstream-chunk-size must be positive integers")
+    if not math.isfinite(args.progress_interval) or args.progress_interval < 0:
+        parser.error("--progress-interval must be a finite nonnegative number")
     if args.basecall_file and (args.regions or args.rf or args.angsd_params):
         parser.error("--regions, --rf, and --angsd-params cannot be used with --basecall-file; these settings require ANGSD")
     if args.basecall_file and args.ref:

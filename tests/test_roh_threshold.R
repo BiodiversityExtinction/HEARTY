@@ -8,11 +8,21 @@ run_tests <- function() {
   dir.create(tmp)
   on.exit(unlink(tmp, recursive = TRUE), add = TRUE)
 
-  # Load only the threshold function to check edge cases without running the CLI.
+  # Help must exit before loading plotting dependencies.
+  for (help_args in list("--help", "-h", character())) {
+    help_log <- file.path(tmp, "help.log")
+    status <- system2(file.path(R.home("bin"), "Rscript"), shQuote(c(script, help_args)),
+                      stdout = help_log, stderr = help_log)
+    stopifnot(status == 0, any(grepl("Usage:", readLines(help_log), fixed = TRUE)))
+  }
+  cat("PASS: --help, -h, and no-argument usage without plotting dependencies\n")
+
+  # Load dependency-free helpers without running the CLI.
   scope <- new.env()
   for (expr in parse(script)) {
     if (is.call(expr) && identical(expr[[1]], as.name("<-")) &&
-        identical(expr[[2]], as.name("resolve_roh_threshold"))) eval(expr, scope)
+        is.symbol(expr[[2]]) && as.character(expr[[2]]) %in%
+        c("resolve_roh_threshold", "default_single_summary_path", "write_single_summary")) eval(expr, scope)
   }
   values <- c(0, 0.0002, 0.001, 0.002, 0.01)
   df <- data.frame(prop = values)
@@ -21,6 +31,14 @@ run_tests <- function() {
   stopifnot(scope$resolve_roh_threshold(data.frame(prop = c(0, 0, 1)), 0.2, "median") == 0)
   stopifnot(inherits(try(scope$resolve_roh_threshold(df, 0.2, "mean"), silent = TRUE), "try-error"))
   cat("PASS: median calculation, absolute cutoff, zero median, and rejection of mean mode\n")
+  stopifnot(scope$default_single_summary_path("plots/sample.pdf") == "plots/sample_summary.txt")
+  stopifnot(scope$default_single_summary_path("sample.PDF") == "sample_summary.txt")
+  stopifnot(scope$default_single_summary_path("sample") == "sample_summary.txt")
+  text_file <- file.path(tmp, "nested", "summary.txt")
+  report <- c("Mean heterozygosity: 0.001", "", "FROH: 0.2")
+  screen <- capture.output(scope$write_single_summary(report, text_file))
+  stopifnot(identical(readLines(text_file), report), identical(screen[seq_along(report)], report))
+  cat("PASS: automatic summary filenames and identical saved/printed report text\n")
   if ("--unit-only" %in% commandArgs(trailingOnly = TRUE)) return(invisible(NULL))
 
   files <- file.path(tmp, c("sampleA.windows.txt", "sampleB.windows_trv.txt"))
@@ -46,6 +64,19 @@ run_tests <- function() {
   pdf <- file.path(tmp, "single.pdf")
   output <- cli(c("--mode", "single", "--input", files[1], "--output-pdf", pdf, tuning, relative))
   stopifnot(grepl("0.000200", output, fixed = TRUE), file.info(pdf)$size > 100)
+  report <- paste(readLines(file.path(tmp, "single_summary.txt")), collapse = "\n")
+  stopifnot(grepl(report, output, fixed = TRUE), grepl("FROH (bridged", report, fixed = TRUE))
+  stopifnot(grepl("Mean heterozygosity (non-ROH, raw definition)", report, fixed = TRUE))
+  custom <- file.path(tmp, "reports", "transversion_summary.txt")
+  output <- cli(c("--mode", "single", "--input", files[2], "--output-pdf", pdf,
+                  "--summary-out", custom, "--froh-cutoffs", "100kb,2mb", tuning, relative))
+  report <- paste(readLines(custom), collapse = "\n")
+  stopifnot(grepl(report, output, fixed = TRUE), grepl("Dataset type: transversion-only", report, fixed = TRUE))
+  stopifnot(grepl(">2 Mb:", report, fixed = TRUE))
+  before <- readLines(files[1])
+  cli(c("--mode", "single", "--input", files[1], "--output-pdf", pdf,
+        "--summary-out", files[1], tuning, relative), success = FALSE)
+  stopifnot(identical(before, readLines(files[1])))
   summary <- file.path(tmp, "summary.tsv")
   batch <- c("--mode", "batch", "--sample-list", samples, "--summary-out", summary,
              "--combined-pdf", file.path(tmp, "batch.pdf"), tuning)
