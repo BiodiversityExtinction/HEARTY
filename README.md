@@ -127,6 +127,8 @@ Optional arguments:
   -h, --help                 Show help
 ```
 
+See [Downsampling parameters](#downsampling-parameters) for what the five downsampling and worker options do and how to choose them.
+
 ### Reusing a shared basecall file
 
 Use `--basecall-file` as an alternative to `--bam` or `--bam-list` to generate minor-frequency and window summaries directly from an existing table. No BAM, ANGSD executable, or `.pos.gz`/`.counts.gz` files are needed.
@@ -287,6 +289,22 @@ That means:
 - the window heterozygosity summaries are built from the mean downsampled calls at each requested threshold
 
 This mode is intended for comparing samples across different coverages without letting deeper samples dominate simply because their allele proportions are estimated more precisely.
+
+### Downsampling parameters
+
+These five options serve two different purposes: the first three control **which reads are sampled and how the calls are made**; the last two control **how the work is divided among processes**. You can use the worker options without enabling downsampling.
+
+| Option | What it does | Practical choice |
+| --- | --- | --- |
+| `--downsample-depth X` | At each site, randomly selects `X` bases **without replacement** from its observed `count_A`, `count_C`, `count_G`, and `count_T`. Sites with fewer than `X` counted bases are excluded from minor-frequency and window summaries, including the callable-site denominator. The original basecall file is unchanged. | Pick a common depth that your samples can support. For example, `15` makes each retained site contribute a sample of 15 bases. This option enables downsampling; without it, the other two downsampling settings have no effect. |
+| `--downsample-reps N` | Draws `N` separate samples of `X` bases **from the full observed counts at each site**. HEARTY averages the A/C/G/T proportions from those draws, then applies `0.05` and all requested `-t` thresholds to that one average. It does not make `N` files or treat `N × X` as extra sequencing depth. Default: `10`. | Use `10` to match the default; `1` uses a single random draw. More replicates reduce random variation from the downsampling procedure but cannot recover alleles absent from the observed reads. More replicates take more CPU time. |
+| `--downsample-seed S` | Sets the deterministic random sequence for each genomic coordinate. The same counts, coordinate, depth, replicate count, and seed give the same result regardless of worker count or chunk size. Default: `1`. | Keep the seed fixed for comparisons and reruns. Change it only to assess sampling variability. The seed is **not included in output filenames**, so use another output prefix/directory to retain results from multiple seeds. |
+| `--downstream-workers N` | Uses `N` worker **processes** to process chunks of sites. Each worker returns aggregated minor-frequency and window counts. It does not create a process or thread per replicate. Default: `1`; the single pass optimization still applies. | Try a value that fits your allocated CPUs, such as `4` or `8` for large genomes. This is separate from `-c`/`--cores`, which controls ANGSD and compression threads. Leave CPU capacity for reading and compression. |
+| `--downstream-chunk-size N` | Sends up to `N` input rows per worker task **before depth filtering**. At most twice the worker count is queued. Default: `10000`. It changes scheduling and memory use, not the counts or random draws. | Start with `10000`. Larger chunks can reduce process overhead but use more memory and delay progress updates; smaller chunks improve balancing when site costs vary. |
+
+For example, if a site has 12 A reads and 8 C reads, `--downsample-depth 15 --downsample-reps 10` draws 15 of those 20 reads ten times. HEARTY averages the ten observed A and C proportions and classifies the site once per threshold from that average. The reads in the basecall table are never replaced or expanded.
+
+`--min-depth` and `--max-depth` are separate filters on the original site depth. They are applied before downsampling; a site must pass both the coverage filters and the counted-base requirement. Use the same coverage filters, downsample depth, replicate count, and seed when comparing samples or reproducing an earlier run.
 
 ## Minor Frequency Plotting
 
