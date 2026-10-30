@@ -17,9 +17,14 @@ Usage:
     --min-coverage-diploid 10 \
     --min-depth-goodhets 10 \
     --het-file /path/to/sample.basecall.txt.gz \
-    --threshold 0.25
+    --threshold 0.25 \
+    --plot --generation-time 10 --mutation-rate 2.5e-8 --sample-age 15000
 
-Required arguments:
+Replot an existing <out-dir>/<prefix>.combined.psmc without rerunning PSMC:
+  bash PSMC_Tool.sh --prefix SAMPLE --out-dir /path/to/output_dir \
+    --plot-only --generation-time 10 --mutation-rate 2.5e-8 --sample-age 15000
+
+Required arguments for a full PSMC run (plot-only needs prefix and out-dir):
   --prefix            Sample stem used for output filenames
   --out-dir           Directory for all outputs
   --bam               Input BAM file
@@ -41,7 +46,17 @@ Optional arguments:
   --skip-bootstrap    Skip bootstrap replicates
   --skip-diploid      Reuse existing diploid fastq instead of regenerating it
   --skip-mask         Reuse existing masked fastq and psmcfa intermediates
+  --plot              Plot the combined PSMC result after the run
+  --plot-only         Plot an existing <prefix>.combined.psmc; skip all analysis
+  --plot-input        Existing .psmc input for --plot-only [default: <out-dir>/<prefix>.combined.psmc]
+  --generation-time   Years per generation; required with --plot or --plot-only
+  --mutation-rate     Per-base mutation rate per generation; required for plotting
+  --sample-age        Sample age in years before present, added to plotted times [default: 0]
+  --psmc-plot         Path to psmc_plot.pl [default: search PATH]
   --help              Show this help message
+
+Plotting requires psmc_plot.pl, gnuplot and epstopdf. Sample age shifts every
+curve (including bootstraps) to years before present; it does not modify PSMC.
 
 Outputs:
   <out-dir>/<prefix>_diploid.fq.gz
@@ -54,6 +69,8 @@ Outputs:
   <out-dir>/<prefix>.psmc
   <out-dir>/<prefix>.round-<n>.psmc
   <out-dir>/<prefix>.combined.psmc
+  <out-dir>/<prefix>.psmc.pdf                  (with --plot or --plot-only)
+  <out-dir>/<prefix>.psmc_plot.txt             (curve and shifted time table)
 EOF
 }
 
@@ -93,6 +110,14 @@ psmc_args=(-N25 -t10 -r5 -p "4+25*2+4+6")
 skip_bootstrap=0
 skip_diploid=0
 skip_mask=0
+plot=0
+plot_only=0
+generation_time=""
+mutation_rate=""
+sample_age="0"
+psmc_plot=""
+plot_input=""
+sample_age_set=0
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -117,6 +142,13 @@ while [[ $# -gt 0 ]]; do
     --skip-bootstrap) skip_bootstrap=1; shift ;;
     --skip-diploid) skip_diploid=1; shift ;;
     --skip-mask) skip_mask=1; shift ;;
+    --plot) plot=1; shift ;;
+    --plot-only) plot=1; plot_only=1; shift ;;
+    --plot-input) plot_input="${2:-}"; shift 2 ;;
+    --generation-time) generation_time="${2:-}"; shift 2 ;;
+    --mutation-rate) mutation_rate="${2:-}"; shift 2 ;;
+    --sample-age) sample_age="${2:-}"; sample_age_set=1; shift 2 ;;
+    --psmc-plot) psmc_plot="${2:-}"; shift 2 ;;
     --help|-h) show_help; exit 0 ;;
     *) die "Unknown argument: $1" ;;
   esac
@@ -124,6 +156,88 @@ done
 
 [[ -n "$prefix" ]] || die "--prefix is required"
 [[ -n "$out_dir" ]] || die "--out-dir is required"
+[[ "$prefix" != */* && "$prefix" != "." && "$prefix" != ".." ]] || die "--prefix must be a filename stem"
+
+if [[ "$plot" -eq 1 ]]; then
+  number_re='^([0-9]+([.][0-9]*)?|[.][0-9]+)([eE][+-]?[0-9]+)?$'
+  [[ "$generation_time" =~ $number_re ]] || die "--generation-time must be a positive number of years"
+  [[ "$mutation_rate" =~ $number_re ]] || die "--mutation-rate must be a positive number per base per generation"
+  [[ "$sample_age" =~ $number_re ]] || die "--sample-age must be a non-negative number of years"
+  awk -v n="$generation_time" 'BEGIN { exit !(n > 0) }' || die "--generation-time must be greater than zero"
+  awk -v n="$mutation_rate" 'BEGIN { exit !(n > 0) }' || die "--mutation-rate must be greater than zero"
+  if [[ -z "$psmc_plot" ]]; then
+    psmc_plot="$(command -v psmc_plot.pl || true)"
+    [[ -n "$psmc_plot" ]] || die "psmc_plot.pl not found in PATH; provide --psmc-plot PATH"
+  fi
+  [[ -f "$psmc_plot" ]] || die "psmc_plot.pl not found: $psmc_plot"
+  psmc_plot="$(cd "$(dirname -- "$psmc_plot")" && pwd -P)/$(basename -- "$psmc_plot")"
+  require_cmd perl
+  require_cmd gnuplot
+  require_cmd epstopdf
+elif [[ "$sample_age_set" -eq 1 || -n "$generation_time" || -n "$mutation_rate" || -n "$psmc_plot" ]]; then
+  die "Plot settings require --plot or --plot-only"
+fi
+if [[ -n "$plot_input" && "$plot_only" -eq 0 ]]; then
+  die "--plot-input is only supported with --plot-only"
+fi
+
+combined_psmc="${out_dir}/${prefix}.combined.psmc"
+plot_input="${plot_input:-$combined_psmc}"
+plot_pdf="${out_dir}/${prefix}.psmc.pdf"
+plot_table="${out_dir}/${prefix}.psmc_plot.txt"
+
+make_plot() {
+  local plot_tmp table_file curve_file curve_index
+  [[ -f "$plot_input" ]] || die "PSMC plot input not found: $plot_input"
+  plot_tmp="$(mktemp -d)" || die "Could not create plotting temporary directory"
+  # psmc_plot.pl uses unquoted shell paths internally, so run it on safe local names.
+  cp -- "$plot_input" "$plot_tmp/input.psmc"
+  log_step "Plotting PSMC (generation time=$generation_time years, mutation rate=$mutation_rate, sample age=$sample_age years)"
+  if ! (cd "$plot_tmp" && perl "$psmc_plot" -g "$generation_time" -u "$mutation_rate" -R plot input.psmc); then
+    rm -rf -- "$plot_tmp"
+    die "psmc_plot.pl failed"
+  fi
+  [[ -s "$plot_tmp/plot.0.txt" && -s "$plot_tmp/plot.gp" ]] || {
+    rm -rf -- "$plot_tmp"
+    die "psmc_plot.pl did not produce curve data and a gnuplot script"
+  }
+  table_file="$plot_tmp/plot_data.txt"
+  printf 'Curve\tTime_years_before_present\tEffective_population_size_1e4\n' > "$table_file"
+  curve_index=0
+  while [[ -f "$plot_tmp/plot.${curve_index}.txt" ]]; do
+    curve_file="$plot_tmp/plot.${curve_index}.txt"
+    awk -v age="$sample_age" -v curve="$curve_index" -v table="$table_file" '
+      BEGIN { FS = OFS = "\t" }
+      NF >= 2 {
+        $1 = sprintf("%.15g", $1 + age)
+        printf "%d\t%s\t%s\n", curve, $1, $2 >> table
+        print
+      }
+    ' "$curve_file" > "$curve_file.shifted"
+    mv -- "$curve_file.shifted" "$curve_file"
+    ((curve_index += 1))
+  done
+  if ! (cd "$plot_tmp" && gnuplot plot.gp && epstopdf plot.eps); then
+    rm -rf -- "$plot_tmp"
+    die "Could not render PSMC PDF"
+  fi
+  [[ -s "$plot_tmp/plot.pdf" ]] || {
+    rm -rf -- "$plot_tmp"
+    die "PSMC plot PDF was not generated"
+  }
+  cp -- "$plot_tmp/plot.pdf" "$plot_pdf"
+  cp -- "$table_file" "$plot_table"
+  rm -rf -- "$plot_tmp"
+  echo "PSMC plot: $plot_pdf"
+  echo "Shifted plot data: $plot_table"
+}
+
+if [[ "$plot_only" -eq 1 ]]; then
+  mkdir -p "$out_dir"
+  make_plot
+  exit 0
+fi
+
 [[ -n "$bam" ]] || die "--bam is required"
 [[ -n "$threads" ]] || die "--threads is required"
 [[ -n "$bed" ]] || die "--bed is required"
@@ -178,7 +292,6 @@ masked_fq="${out_dir}/${prefix}_diploid_masked.fq.gz"
 psmcfa="${out_dir}/${prefix}.psmcfa"
 split_psmcfa="${out_dir}/${prefix}.split.psmcfa"
 psmc_main="${out_dir}/${prefix}.psmc"
-combined_psmc="${out_dir}/${prefix}.combined.psmc"
 
 log_step "Preparing diploid fastq"
 if [[ "$skip_diploid" -eq 1 ]]; then
@@ -266,6 +379,10 @@ else
   cp "$psmc_main" "$combined_psmc"
 fi
 
+if [[ "$plot" -eq 1 ]]; then
+  make_plot
+fi
+
 log_step "Done"
 echo "PSMC threshold column: $status_col"
 echo "Diploid coverage cutoff: $min_coverage_diploid"
@@ -280,3 +397,7 @@ echo "  $psmcfa"
 echo "  $split_psmcfa"
 echo "  $psmc_main"
 echo "  $combined_psmc"
+if [[ "$plot" -eq 1 ]]; then
+  echo "  $plot_pdf"
+  echo "  $plot_table"
+fi

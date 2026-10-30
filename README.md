@@ -56,6 +56,7 @@ PSMC helper:
 - `fq2psmcfa`
 - `splitfa`
 - `psmc`
+- Optional PSMC plotting: `psmc_plot.pl` (from PSMC), `perl`, `gnuplot`, and `epstopdf`
 
 ## Main Tool
 
@@ -629,7 +630,7 @@ When `--fill-cap auto` is used:
 
 ## PSMC Helper
 
-`PSMC_Tool.sh` prepares masked PSMC input using a HEARTY basecall table and a chosen threshold column, and then runs PSMC on the masked result.
+`PSMC_Tool.sh` prepares masked PSMC input using a HEARTY basecall table and a chosen threshold column, and then runs PSMC on the masked result. Plotting is optional.
 
 ### Basic usage
 
@@ -670,7 +671,11 @@ bash PSMC_Tool.sh \
   --max-depth-goodhets 80 \
   --het-file /path/to/SampleA.basecall.txt.gz \
   --threshold 0.25 \
-  --bootstrap-rounds 50
+  --bootstrap-rounds 50 \
+  --plot \
+  --generation-time 10 \
+  --mutation-rate 2.5e-8 \
+  --sample-age 15000
 ```
 
 What it does:
@@ -680,6 +685,7 @@ What it does:
 - masks unsupported candidate hets
 - runs `psmc`
 - optionally runs bootstrap replicates
+- optionally makes a PSMC plot with the sample-age time shift
 
 So the workflow is:
 1. build a diploid fastq backbone from the BAM
@@ -688,6 +694,7 @@ So the workflow is:
 4. convert the masked fastq into `psmcfa`
 5. run the main PSMC analysis
 6. optionally run bootstrap replicates and combine them
+7. optionally plot the combined PSMC curves
 
 ### Required inputs
 
@@ -737,6 +744,31 @@ So the workflow is:
   Reuse an existing masked fastq and existing `psmcfa` intermediates.
 - `--skip-bootstrap`
   Skip the bootstrap replicate stage.
+- `--plot`
+  Make a PDF from the combined PSMC output after the analysis. Requires `psmc_plot.pl`, `gnuplot`, and `epstopdf`.
+- `--generation-time`
+  Years per generation used to scale the plot's time axis. Required when plotting; do not assume the PSMC plotting script's default is appropriate for your species.
+- `--mutation-rate`
+  Per-base, per-generation mutation rate used to scale both the time and effective population size axes. Required when plotting.
+- `--sample-age`
+  Age of the sequenced sample in years before present, default `0`. This is **added to the time coordinate of every PSMC curve**, including bootstraps, after scaling. For a specimen dated to 15 thousand years ago, use `--sample-age 15000`, not `15`. The time axis is logarithmic, so this is an additive shift in years, not a multiplication or a uniform visual translation. The PSMC analysis itself is unchanged.
+- `--plot-only`
+  Replot an existing `<out-dir>/<prefix>.combined.psmc` without requiring BAM, reference, basecall file, or rerunning any analysis. Supply `--prefix`, `--out-dir`, `--generation-time`, and `--mutation-rate`; use `--sample-age` if applicable.
+- `--plot-input`
+  Optional input `.psmc` path for `--plot-only` if the existing result is elsewhere. The plot and table still go into `--out-dir` under `--prefix`.
+- `--psmc-plot`
+  Path to `psmc_plot.pl` if it is not on `PATH`.
+
+To change only plotting assumptions after a completed run:
+
+```bash
+bash PSMC_Tool.sh \
+  --prefix SampleA --out-dir PSMC_out \
+  --plot-only --generation-time 10 --mutation-rate 2.5e-8 \
+  --sample-age 15000
+```
+
+The age adjustment is a simple display-time correction from time before the sample to time before present. It does not account for uncertainty in sample dating or any change in the PSMC model for ancient samples.
 
 ### Main outputs
 
@@ -761,6 +793,10 @@ The script writes:
   Bootstrap replicate outputs.
 - `<prefix>.combined.psmc`
   Combined file containing the main run plus bootstrap replicates.
+- `<prefix>.psmc.pdf` (with plotting enabled)
+  PSMC curve with the requested generation time, mutation rate, and sample-age offset.
+- `<prefix>.psmc_plot.txt` (with plotting enabled)
+  Tab-delimited plotted coordinates: curve number (`0` is the primary run; later numbers are bootstraps), time in years before present, and effective population size in units of 10,000. Each curve receives the same sample-age offset.
 
 ### Recommended defaults
 
